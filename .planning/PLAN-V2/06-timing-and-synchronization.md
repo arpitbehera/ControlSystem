@@ -46,7 +46,7 @@ PTP is not achievable on installed gear (Cisco 3560G has no PTP support; RB3011 
 ## OPX-internal sync
 
 - Single OPX+ chassis in v1. Intra-chassis sync is the vendor's responsibility.
-- If a second OPX+ is added (potential within 24 months), the QM cluster docs describe inter-chassis sync. Adding a second OPX may add a constraint on the VLAN-50 subnet design — this should be a Phase 5+ decision (`amo-control-system-design.md` §1014, #7).
+- If a second OPX+ is added (potential within 24 months), the QM cluster docs describe inter-chassis sync. Adding a second OPX may add a constraint on the VLAN-50 subnet design — this should be a Phase 5+ decision (`amo-control-system-design.md` §1.10, #7).
 
 ## SLM HDMI timing constraint
 

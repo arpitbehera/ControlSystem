@@ -38,7 +38,7 @@ class RtJobSubmission:
     input_stream_seed: Mapping[str, bytes]  # initial payloads if any
     expected_outputs: list[str]    # which stream_processing outputs to surface
     deadline_ticks: int            # PPU-clock deadline; missed → rt_timeout
-    safety_token: SafetyToken      # signed by Layer 4 after descriptor validation
+    validation_token: ValidationToken  # signed by Layer 4 after descriptor validation; NOT the hardware safety plane (§09)
     run_uuid: UUID
 
 # L1 → L2 result contract
@@ -52,7 +52,7 @@ class RtJobResult:
     safety_state_on_exit: SafetyState
 ```
 
-The `safety_token` is the gate. The compiler at L4 attaches it only after the run passes descriptor validation, parameter bounds, and rate limits. The broker refuses any `RtJobSubmission` whose `safety_token` is missing or expired. Safety plane behavior is in §09.
+The `validation_token` is the gate. The compiler at L4 attaches it only after the run passes descriptor validation, parameter bounds, and rate limits. The broker refuses any `RtJobSubmission` whose `validation_token` is missing or expired. The token is a *compile-time attestation that validation ran* — it is **not** the safety mechanism. Real safety is the independent hardware safety plane in §09, which can inhibit RF/AOD/shutters regardless of any token.
 
 In-shot rearrangement messages are a special case of this seam — see §07 for the `RearrangementBatchV1` wire format.
 
@@ -63,7 +63,7 @@ Out of scope at this boundary:
 ## L2 ↔ L3 — Device-Server ↔ Persistence
 
 L2 produces:
-- Per-shot rows for `shots` table (DB).
+- Per-shot *records* (the shot data + manifest hash) handed to the orchestrator; L2 never writes the `shots` table directly (the transactional commit is L5's — see durable shot commit below, and the role exclusion under "Out of scope").
 - HDF5 raw blobs into the local spool, then into the data lake.
 - Heartbeat + health events.
 
@@ -83,7 +83,7 @@ Crossings:
 - **Calibration publication** (the transactional path per critique F-04):
   1. Calibration node runs → produces candidate `calibration_execution` row.
   2. `fitness_check` runs → marks candidate `passed` / `marginal` / `failed`.
-  3. On `passed`, a new `calibration_snapshot` row is inserted in one transaction that closes the previous snapshot's `valid_until` and references the new `parameter_versions` set.
+  3. On `passed`, in one transaction: a new immutable `calibration_snapshots` row is inserted referencing the new `parameter_versions` set, **and** a new `snapshot_activations` row is appended pointing the lineage at it. The previous snapshot is never mutated (no `valid_until` close — its validity ends implicitly when the next activation supersedes it). See ADR-0003.
   4. Failed candidates never become a snapshot; downstream nodes are not run on a failed upstream (critique F-16).
 
 Out of scope:
@@ -121,7 +121,7 @@ class CompiledRun:
     snapshot_id: int
     descriptor_id: int
     execution_bundle_id: int
-    safety_token: SafetyToken
+    validation_token: ValidationToken
 ```
 
 The compiler **rejects-at-submit** on any descriptor violation (Pulser-shaped, P7). Rejections happen *before* the device-server queue sees a submission.

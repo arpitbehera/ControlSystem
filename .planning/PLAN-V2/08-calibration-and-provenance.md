@@ -63,24 +63,29 @@ A snapshot is the *immutable, published* set of parameter versions a run execute
 
 ### Publication transaction
 
+Currency is tracked by the **append-only activation log** (`snapshot_activations`), not by a "snapshot with no child" head and not by a `valid_until` interval (ADR-0003). `parent_id` records *ancestry/inheritance* only — it is never used to determine which snapshot is current.
+
 ```sql
 BEGIN;
-  -- New snapshot inherits everything from parent
+  -- 1. Insert the new immutable snapshot, inheriting parameter_set from its parent.
   INSERT INTO calibration_snapshots (parent_id, parameter_set, published_at, published_by)
     SELECT id, parameter_set || jsonb_build_object(:name, :new_param_version_id),
            NOW(), :user
-      FROM calibration_snapshots WHERE id = :parent_id;
-  -- Optionally close prior snapshot
-  -- (snapshots are not "closed"; they remain queryable forever)
+      FROM calibration_snapshots WHERE id = :parent_id
+    RETURNING id INTO :new_snapshot_id;
+  -- 2. Append an activation row pointing the lineage at the new snapshot.
+  --    "Current" = the latest activation for this lineage. No row is ever mutated.
+  INSERT INTO snapshot_activations (lineage, snapshot_id, activated_by)
+    VALUES (:lineage, :new_snapshot_id, :user);
 COMMIT;
 ```
 
 Properties:
 
-- A snapshot is **append-only**: the row, once committed, is never updated. Newer snapshots inherit from older ones via `parent_id`.
-- A run resolves its `snapshot_id` at submit time, atomically. The scheduler reads the *current head* (no parent for which a child exists) and pins it.
-- Concurrent publications serialize at the `INSERT` — the second publisher reads the now-updated head and inherits from it.
-- A wrong calibration cannot retroactively poison existing data: every shot points at the snapshot that was head at its arm time, by ID.
+- A snapshot is **append-only**: the row, once committed, is never updated. `parent_id` is inheritance lineage, not currency.
+- A run resolves its `snapshot_id` at submit time, atomically, by reading the **latest `snapshot_activations` row for its lineage** and pinning that `snapshot_id`.
+- Concurrent publications are safe: each appends its own snapshot + activation; the latest activation wins deterministically. There is no ambiguous "two heads" state (the old parent-chain head model could produce two children of one parent — the activation log cannot).
+- A wrong calibration cannot retroactively poison existing data: every shot points at the snapshot that was *active* at its arm time, by ID. A bad publication is corrected by activating a known-good snapshot (a new activation row), never by mutating history.
 
 ### Snapshot vs registry semantics
 
@@ -88,12 +93,15 @@ There is no "registry" table that can be read for "current value". The current v
 
 ```sql
 SELECT pv.value
-FROM   calibration_snapshots cs
-JOIN   parameter_versions pv ON (cs.parameter_set ->> 'pi_pulse_amp')::bigint = pv.id
-WHERE  cs.id = :current_head_snapshot_id;
+FROM   snapshot_activations sa
+JOIN   calibration_snapshots cs ON cs.id = sa.snapshot_id
+JOIN   parameter_versions    pv ON (cs.parameter_set ->> 'pi_pulse_amp')::bigint = pv.id
+WHERE  sa.lineage = :lineage
+ORDER  BY sa.activated_at DESC
+LIMIT  1;
 ```
 
-The "current head" is the snapshot with no child. A run pinned to a snapshot reads its parameters by ID; concurrent publication of a new snapshot does not affect runs in flight.
+The current snapshot is the latest activation for the lineage. A run pinned to a snapshot reads its parameters by ID; a later activation does not affect runs in flight.
 
 ### Snapshot publication authority
 
@@ -155,8 +163,8 @@ Properties:
 | Scenario | Safety property |
 |---|---|
 | Two operators submit conflicting runs | Idempotency by `(user, idempotency_key)`; serial queue prevents reorderings |
-| Senior operator publishes new snapshot mid-run | In-flight run keeps its pinned `snapshot_id`; new run picks new head |
-| Admin patches `device_descriptor` mid-run | In-flight run keeps its pinned `descriptor_id`; new run sees new descriptor |
+| Senior operator publishes new snapshot mid-run | In-flight run keeps its pinned `snapshot_id`; a new run reads the latest activation |
+| Admin publishes + activates a new `device_descriptor` mid-run | In-flight run keeps its pinned `descriptor_id`; a new run reads the latest descriptor activation (no in-place patch) |
 | Analyst tries to mutate calibration | Postgres role lacks `INSERT` privilege; ACL also rejects at gRPC layer |
 | Automated agent submits a non-allow-listed template | Compiler refuses; never enters queue |
 

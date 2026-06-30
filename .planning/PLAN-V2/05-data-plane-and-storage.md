@@ -19,9 +19,9 @@ This document defines the *durable shot-commit protocol* that prevents the failu
 Each shot produces:
 
 1. **One raw HDF5 file** under `<lake>/YYYY/MM/DD/<run_uuid>/shot_<index>.h5` with datasets:
-   - `image_andor` (uint16, primary EMCCD frame)
+   - `image_andor_initial`, `image_andor_final` (uint16) — EMCCD frames before the first and after the last rearrangement loop. A shot runs **≤ 2 rearrangement loops**; only these two endpoints are persisted (no per-loop series).
    - `image_<aux>` (per GigE / USB camera that participated)
-   - `occupation_matrix` (uint8, from in-shot classifier)
+   - `occupation_matrix_initial`, `occupation_matrix_final` (uint8, from in-shot classifier) — matched to the initial/final frames.
    - `qua_outputs/<stream_name>` (small QUA `stream_processing` arrays)
    - HDF5 attributes: `shot_uuid`, `run_uuid`, `shot_index`, `snapshot_id`, `descriptor_id`, `execution_bundle_id`, `qm_config_hash`, `code_commit_sha`, `safety_state_on_exit`, `producer_versions` (jsonb)
 2. **One row in `shots`** with the same IDs, indexed.
@@ -44,15 +44,16 @@ Time ─────────────────────────
                   │                    │ fsync()
                   │           [local durable spool on Tower NVMe]
                   │                    │
-                  ├────── gRPC: ShotResult{raw_manifest, …} ──►  [Scheduler/Postgres on EliteDesk]
-                  │                                                     │
-                  │                                                     │ BEGIN TX
-                  │                                                     │   INSERT shots
-                  │                                                     │   INSERT raw_manifests
-                  │                                                     │   raw_state='pending'
-                  │                                                     │ COMMIT
-                  │                                                     │
-                  │                                            shot is now durable in DB
+                  ├─ ShotResult{raw_manifest, …} ─► [Orchestrator on Tower] ─► [Postgres on EliteDesk]
+                  │     (local IPC, same host)            │                          │
+                  │                                       │ (after local-durable     │ BEGIN TX
+                  │                                       │  spool fsync above, the  │   INSERT shots
+                  │                                       │  shot is already         │   INSERT raw_manifests
+                  │                                       │  recoverable: state      │   raw_state='pending'
+                  │                                       │  raw_spooled)            │ COMMIT
+                  │                                       │                          │
+                  │                                       └─ mirrors to DB ──────────┘
+                  │                                            shot now also durable in DB mirror
                   │                                            (raw on Tower spool only)
                   │
 [Data-lake writer]         consume spool → write into lake dir
@@ -71,7 +72,8 @@ Time ─────────────────────────
 
 Failure modes covered:
 - **Broker dies after fsync but before gRPC**: on restart, the broker re-reads the spool and replays the `ShotResult` gRPC, using `shot_uuid` as idempotency key. The scheduler dedupes.
-- **Scheduler dies before commit**: broker retries with backoff; idempotency key prevents duplicates after recovery.
+- **Orchestrator process dies before mirroring**: the shot is already `raw_spooled` (locally durable on Tower); on restart the orchestrator re-reads the spool and replays the DB mirror, `shot_uuid` as idempotency key.
+- **Postgres / EliteDesk unreachable (cross-host partition)**: the shot stays locally durable as `raw_spooled`; the orchestrator buffers the DB mirror and replays it when Postgres returns. Run execution continues — run/shot state is Tower-local-authoritative, the DB is the mirror (see 04 run-FSM authority note). No data loss; the DB simply lags.
 - **Tower disk fails after gRPC but before lake write**: shot row is in DB with `raw_state='pending'` and a manifest hash. The off-host replica is the recovery source — if not yet ack'd, the shot is marked `raw_lost` via operator workflow.
 - **Off-host replica delayed**: shots stay `raw_state='pending'` until ack. Spool is retained.
 
@@ -91,13 +93,15 @@ RPO / RTO targets (to be hardened in Phase 3):
 -- Hardware descriptors (versioned, never overwritten)
 CREATE TABLE device_descriptors (
     id              BIGSERIAL PRIMARY KEY,
-    valid_from      TIMESTAMPTZ NOT NULL,
-    valid_until     TIMESTAMPTZ,            -- closing interval, set when superseded
+    created_at      TIMESTAMPTZ NOT NULL,
     content         JSONB NOT NULL,         -- channels, geometry, timing, bounds, safety
     content_hash    BYTEA NOT NULL UNIQUE,
     inserted_by     TEXT NOT NULL,
     notes           TEXT
 );
+-- NOTE: descriptors are immutable. "Which descriptor is active" is NOT a column on
+-- this table (no valid_until — that would mutate an immutable row, per ADR-0003).
+-- Currency lives in the append-only descriptor_activations pointer log below.
 
 -- Calibration DAG definitions (recipe)
 CREATE TABLE dag_nodes (
@@ -142,6 +146,27 @@ CREATE TABLE calibration_snapshots (
     UNIQUE (parent_id, parameter_set)
 );
 
+-- Currency pointers (validity model, replaces valid_until intervals — ADR-0003).
+-- Append-only: "active" = the latest activation row per lineage. Immutable snapshot/
+-- descriptor rows are never mutated; only a new pointer row is appended. Validity
+-- intervals are derivable (a row is active until the next activation in its lineage)
+-- without storing or mutating any interval. Concurrent publishes serialize on the
+-- append and the latest wins atomically.
+CREATE TABLE snapshot_activations (
+    id              BIGSERIAL PRIMARY KEY,
+    lineage         TEXT NOT NULL DEFAULT 'default',   -- supports parallel lineages later
+    snapshot_id     BIGINT NOT NULL REFERENCES calibration_snapshots(id),
+    activated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    activated_by    TEXT NOT NULL
+);
+CREATE TABLE descriptor_activations (
+    id              BIGSERIAL PRIMARY KEY,
+    lineage         TEXT NOT NULL DEFAULT 'default',
+    descriptor_id   BIGINT NOT NULL REFERENCES device_descriptors(id),
+    activated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    activated_by    TEXT NOT NULL
+);
+
 -- Bundle of compiled artifacts + environment (critique F-14)
 CREATE TABLE execution_bundles (
     id              BIGSERIAL PRIMARY KEY,
@@ -152,6 +177,8 @@ CREATE TABLE execution_bundles (
     firmware        JSONB NOT NULL,         -- QOP version, OPX server build, etc.
     code_commit_sha BYTEA NOT NULL,
     worktree_dirty  BOOLEAN NOT NULL,
+    classifier_model_hash BYTEA,            -- rearrangement classifier weights (NULL if none)
+    cuda_kernel_hash      BYTEA,            -- compiled CUDA kernel build (NULL if CPU path)
     created_at      TIMESTAMPTZ NOT NULL
 );
 
@@ -198,11 +225,13 @@ CREATE INDEX shots_run_idx          ON shots (run_uuid, shot_index);
 CREATE INDEX shots_state_idx        ON shots (state) WHERE state <> 'committed';
 CREATE INDEX calexec_node_idx       ON calibration_executions (dag_node_name, generated_at DESC);
 CREATE INDEX paramver_name_idx      ON parameter_versions (parameter_name, inserted_at DESC);
+CREATE INDEX snapact_lineage_idx    ON snapshot_activations (lineage, activated_at DESC);
+CREATE INDEX descact_lineage_idx    ON descriptor_activations (lineage, activated_at DESC);
 ```
 
 Notes:
 - `parameter_versions` is append-only. The "current" view is computed via `calibration_snapshots`, never by latest timestamp.
-- `device_descriptors` rows are append-only; supersession sets `valid_until`, never deletes the row.
+- `calibration_snapshots` and `device_descriptors` are immutable and append-only. Currency is **not** a column on those tables; the active row is the latest entry in `snapshot_activations` / `descriptor_activations` for the lineage. No row is ever mutated or deleted (per ADR-0003 — `valid_until` interval-closing was rejected as a mutation that loses concurrent-publication safety).
 - `execution_bundles` is the answer to critique F-14: every shot can be reconstructed from one bundle row + one snapshot + one descriptor.
 
 ## Backup and replication

@@ -44,7 +44,7 @@ The lab runs a neutral-atom optical-tweezer experiment. The control system must:
 
 | Constraint | Source | Implication |
 |---|---|---|
-| `PC1` is the fixed orchestrator host in v1 | `PROJECT.md` | Run ownership stays on the Tower; do not split orchestrator across hosts |
+| `PC1` is the run-execution authority in v1 | `PROJECT.md`, ADR-0001 | Run ownership + orchestrator (scheduler, FSM, DAG runner) + broker stay on the Tower; only the Tower can advance run state. EliteDesk is a Job Validator/Submitter + durable store, not an authority. In v1 all roles co-locate on the Tower; distribution is later |
 | Windows-first runtime | `PROJECT.md` | Orchestration, testing, packaging on Windows; no Linux-only stack |
 | Python is never in the hard-timing loop | `PROJECT.md`, OPX architecture | All timed analog/digital lives on the OPX PPU; Python is the builder / planner / consumer |
 | Bulk payloads stay off the control path | `PROJECT.md` | Camera frames + SLM patterns local to the host that owns them; orchestrator handles metadata and derived outputs only |
@@ -85,3 +85,4 @@ Per the critique register (`critique-and-improvements-1.md` §I-15, §F-13, §F-
 - Run model types: `RunRequest`, `RunPlan`, `ShotResult`, `RunSummary`.
 - Rearrangement-loop wire message: `RearrangementBatchV1` (fixed-width, versioned, padded). Detailed in §07.
 - Role × verb access matrix (verbs may be added, never silently changed).
+- **Rearrangement-loop latency budget:** `t_compute + t_insert + t_execute ≤ 5 ms` measured from occupation-ready (the pseudo-RT fixed wait-slot), against the canonical timing spans in §07. Atom in-trap lifetime ≈ 2 s; a shot runs ≤ 2 rearrangement loops; per-loop wall-clock ≈ 22 ms (incl. ~10 ms exposure + ~7 ms readout). On compute overrun the loop plays a best-effort partial and retries on the next loop. Phase 0A measures every span before this is hard-frozen.

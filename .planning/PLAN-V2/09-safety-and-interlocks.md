@@ -16,8 +16,10 @@ Data-integrity controls are not a substitute for hardware safety. The control sy
 | **L1.5 Watchdog** | PPU-internal watchdog: if `advance_input_stream` blocks past `deadline_ticks`, play safe-state pulse and surface `safety_trip` | QUA program |
 | **L1.7 Broker watchdog** | If broker process dies, OS-level watchdog notifies scheduler; scheduler issues `Disarm` to all device services and signals OPX to halt next shot | Windows service watchdog; scheduler heartbeat |
 | **L2 Device-service guards** | Each managed device enforces a `safe_default` on `Disarm`; PSUs ramp down; cameras stop triggering; SLM holds last frame | Device service per family |
-| **L5 Scheduler interlocks** | Refuses to issue `Start` when descriptor/safety token is invalid; refuses to enter `armed` state with stale calibration; refuses to publish snapshots that violate descriptor bounds | Scheduler |
+| **L5 Scheduler interlocks** | Refuses to issue `Start` when descriptor/`validation_token` is invalid; refuses to enter `armed` state with stale calibration; refuses to publish snapshots that violate descriptor bounds | Scheduler |
 | **L6 Operator interlocks** | Operator E-stop on dashboard + lab terminal CLI: `scheduler.abort()` triggers Disarm-all and writes operator acknowledgement requirement | UI + scheduler |
+
+> **Independence boundary.** Only **L0, L0.5, L1, and L1.5** are the *independent safety plane* — they bring the apparatus to a safe state even if every software process (orchestrator, broker, scheduler, UI) is dead, hung, or compromised. **L1.7, L2, L5, and L6 are software defense-in-depth**: they add earlier/cleaner interventions but *depend on the orchestrator being alive* and therefore are **not** part of the independent backstop. The critique-F-03 guarantee ("loss of a Python process cannot damage the apparatus or harm a person") rests entirely on the L0–L1.5 rows. Do not count L5/L6 toward independence. This is the same distinction as [[validation-token]] vs [[safety-plane]]: a software check is not a safety guarantee.
 
 ## Safe states (per element)
 
@@ -74,13 +76,15 @@ The PPU watchdog is the **load-bearing** one for hung input streams (critique F-
 
 No automatic replay of a physics shot after a safety trip (critique F-15). Operator must explicitly acknowledge that the safe state was reached and the apparatus is in a known-good condition.
 
-## Safety token
+## Validation token
 
-The compiler attaches a `SafetyToken` to every `CompiledRun`. The broker refuses any `RtJobSubmission` without a valid token. Token contents:
+> **Naming:** this is the `validation_token` — a *compile-time attestation that descriptor validation + bounds + rate-limit checks ran*. It is **not** the safety mechanism and must not be confused with the independent hardware safety plane described in the rest of this document. The safety plane (interlocks, watchdogs, defined safe states) inhibits RF/AOD/shutters regardless of any token, including when the orchestrator is dead. A valid token only proves validation executed; if the validation logic itself is wrong, the hardware plane — not the token — is the backstop.
+
+The compiler attaches a `ValidationToken` to every `CompiledRun`. The broker refuses any `RtJobSubmission` without a valid token. Token contents:
 
 ```python
 @dataclass(frozen=True)
-class SafetyToken:
+class ValidationToken:
     descriptor_id: int
     snapshot_id: int
     bounds_hash: bytes              # sha256 over evaluated bounds in this compile
@@ -92,7 +96,7 @@ class SafetyToken:
 Properties:
 - Tokens cannot be forged by L2 / L3 / L5 — the HMAC key lives only in L4.
 - Tokens expire fast. A run that sits in the queue past expiry is recompiled (L4 re-attaches a fresh token).
-- The broker validates the token signature and the `(descriptor_id, snapshot_id)` against the current head; mismatch → reject.
+- The broker validates the token signature and the `(descriptor_id, snapshot_id)` against the current active pointer; mismatch → reject.
 
 ## Validation tests
 
@@ -121,4 +125,4 @@ What it *does* own: the contract that says "every safety event has a defined saf
 - **A2** (hidden global state in instrument drivers) — `Disarm` is idempotent; safe-state is descriptor-defined, not driver-cached.
 - **A3** (Python in the timed loop) — safety plane has no Python on the hot path; PPU watchdog is QUA-native; hardware E-stop has no software.
 - **A8** (one fast box does everything) — broker death is contained; safety plane is independent of the broker.
-- **A10** (bypassing sequencer for quick fixes) — the safety token + compiler-only QUA emission prevent "let me just toggle this DO from Python" workarounds.
+- **A10** (bypassing sequencer for quick fixes) — the `validation_token` + compiler-only QUA emission prevent "let me just toggle this DO from Python" workarounds.

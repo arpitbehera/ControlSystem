@@ -69,8 +69,10 @@ Every architectural decision below traces to one or more of these seams.
 | RT / non-RT boundary | L1 ↔ L2 | `RtJobSubmission` / `RtJobResult` |
 | Description as data | L4 | Builder + compiler; emulator backend |
 | Calibration store | L3 | Postgres tables; HDF5 attrs reflect IDs |
-| Calibration DAG | L5 + L3 | DAG traversal at L5; persistence at L3 |
+| Calibration DAG | L5 + L3 | DAG traversal at L5 (Tower); persistence at L3 (EliteDesk store) |
 | Per-shot snapshot | L3 → L1 | `snapshot_id` resolved at compile time, embedded in shot record |
+
+> **Authority note:** L5 (Scheduler + State FSM + DAG runner) and the Broker both run on the **Tower** — the Tower is the run-execution authority. The **EliteDesk** hosts L3's durable store and acts as Job Validator/Submitter only; it cannot advance run state. In v1 all of this is **co-located on the Tower**; the EliteDesk split is a later deployment step. See ADR-0001.
 | Driver-per-instrument | L2 | Each device-server is one Windows service or one Python long-running process |
 | Pseudoclock as timing root | L1 | OPX+ PPU |
 
@@ -111,11 +113,13 @@ Default rule: **bulk stays local unless a concrete reason requires movement**. R
                  └──────────────┬────────────────┘
                                 │  gRPC, RBAC
                                 ▼
-       ┌────────── Orchestrator (EliteDesk + Tower-resident broker) ──────────┐
+       ┌────────── Orchestrator (Tower = execution authority) ───────────────┐
        │   Scheduler   │   Compiler   │   Calibration DAG runner   │ State FSM │
-       │   (EliteDesk) │  (EliteDesk) │       (EliteDesk)          │ (EliteDesk)│
+       │   (Tower)     │   (Tower)    │        (Tower)             │  (Tower)  │
        │                                                                       │
        │   Broker (Tower) — owns OPX client, framegrabber, GPU pipeline       │
+       │                                                                       │
+       │   EliteDesk = Job Validator/Submitter + durable store (no authority) │
        └────┬────────────────┬──────────────────┬──────────────────────────────┘
             │ gRPC           │ gRPC             │ gRPC + libs
             ▼                ▼                  ▼
@@ -143,21 +147,25 @@ Default rule: **bulk stays local unless a concrete reason requires movement**. R
                        └─────────────────────────────┘
 ```
 
-## Process layout (Tower-resident broker, EliteDesk-resident orchestrator)
+## Process layout (Tower = orchestrator + broker; EliteDesk = validator + store)
 
-On the Tower (`PC1`), in order of run-criticality:
+> **v1 deployment:** all processes below run **co-located on the Tower** during development and testing. The EliteDesk-resident processes move off-host only in a later distribution step; their role boundary is fixed now so the move is a deployment change, not a redesign. See ADR-0001.
 
-1. **Broker process** (single Python interpreter, pinned CPU affinity, no GUI). Owns `QuantumMachinesManager`, BitFlow capture, GPU pipeline, `insert_input_stream`, durable local raw spool. *Latency-critical; one process per run.*
-2. **Andor service** (separate Windows service). Owns Andor SDK; serves non-loop snaps. Idle / suspended during armed runs.
-3. **Compute service** (separate process, same GPU). Non-loop GPU work — offline reanalysis, calibration analyses. **Operator-visible mutex prevents concurrent run + compute.**
-4. **Data lake writer** (separate process). Consumes shot records from the broker via shared-memory queue, writes HDF5 + checksums asynchronously.
+On the Tower (`PC1`), in order of run-criticality — **the Tower is the run-execution authority**:
 
-On the EliteDesk:
+1. **Orchestrator process** (Python long-running process). State FSM, lifecycle coordinator, queue, calibration-DAG runner. **Owns run state — only the Tower can advance a run.**
+2. **Compiler service** (in-process with the orchestrator in v1; can be split later).
+3. **Broker process** (single Python interpreter, pinned CPU affinity, no GUI). Owns `QuantumMachinesManager`, BitFlow capture, GPU pipeline, `insert_input_stream`, durable local raw spool. *Latency-critical; one process per run.* Holds no durable authority of its own — it is the orchestrator's RT execution arm.
+4. **Andor service** (separate Windows service). Owns Andor SDK; serves non-loop snaps. Idle / suspended during armed runs.
+5. **Compute service** (separate process, same GPU). Non-loop GPU work — offline reanalysis, calibration analyses. **Operator-visible mutex prevents concurrent run + compute.**
+6. **Data lake writer** (separate process). Consumes shot records from the broker via shared-memory queue, writes HDF5 + checksums asynchronously.
 
-1. **Scheduler / orchestrator** (Python long-running process). State FSM, lifecycle coordinator, queue, calibration-DAG runner.
-2. **Compiler service** (in-process with scheduler in v1; can be split later).
-3. **Postgres** (local NVMe). Metadata DB + calibration registry.
-4. **Read-only dashboard backend** (FastAPI on a separate port).
+On the EliteDesk — **Job Validator/Submitter + durable store, no run authority**:
+
+1. **Job Validator/Submitter** (Python long-running process). Validates `RunRequest` → `RunPlan` against the `DeviceDescriptor`, submits job requests to the Tower orchestrator. Cannot advance run state.
+2. **Postgres** (local NVMe). Metadata DB + calibration registry — durable history that survives a Tower crash.
+3. **Read-only dashboard backend** (FastAPI on a separate port).
+4. **Off-host raw replica** target.
 5. **TFTP server** for switch / router config backups.
 
 On `PC2` (HP Z2 Mini):
@@ -173,7 +181,7 @@ On `PC3` (Lenovo ThinkCentre):
 
 ## What this orientation buys
 
-- **A8 mitigation**: the Tower stays as the broker but never holds the calibration registry — a Tower crash kills an in-flight shot, not history.
+- **A8 mitigation**: the Tower is the run-execution authority but never holds the durable calibration registry / metadata DB (those live in the EliteDesk store) — a Tower crash kills an in-flight shot, not history.
 - **Latency-first**: the rearrangement loop is entirely in one PCIe topology; no cross-host hop on the critical path.
 - **Failure-domain separation**: scheduler and DB on a different host than the loop; backup target on yet another storage domain.
 - **Conway-resistant**: layered seams survive personnel turnover (`amo-control-system-design.md` §2.3 / A20).

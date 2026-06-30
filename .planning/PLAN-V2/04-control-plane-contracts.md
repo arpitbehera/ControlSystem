@@ -114,7 +114,7 @@ class RunPlan:
     compiled: CompiledRun
     shot_schedule: list[ShotSpec]               # per-shot parameter resolution
     estimated_duration_s: float
-    safety_token: SafetyToken
+    validation_token: ValidationToken
 
 @dataclass(frozen=True)
 class ShotResult:
@@ -145,7 +145,7 @@ class RunSummary:
 
 ## Run state machine
 
-Per critique F-15, runs and shots both carry an explicit state machine. The scheduler is the authority; transitions are persisted in Postgres.
+Per critique F-15, runs and shots both carry an explicit state machine. The **Tower orchestrator is the authority**: run state is held authoritatively in-process on the Tower and written to a local durable WAL synchronously, then mirrored to Postgres (on the EliteDesk) **eventually-consistently**. A run-state transition never *blocks* on a remote Postgres commit — this is what lets an in-flight run continue when the EliteDesk is unreachable (see 02 failure table). Postgres is the durable history mirror, not the authority. The shot FSM already follows this (`raw_spooled` = locally durable before `committed`).
 
 ```
                                             (operator abort)
@@ -173,11 +173,20 @@ prepared → armed → executing → raw_spooled → committed
 
 `raw_spooled` is the durable-commit waypoint — once the broker has fsync'd the raw payload + manifest locally, the shot is recoverable even if Postgres has not yet committed. `committed` requires the DB row insert to succeed *and* an off-host replica to acknowledge the manifest.
 
+## Submission path: admission gateway → authority
+
+Submission is two named stages (ADR-0001):
+
+1. **Admission** (EliteDesk Job Validator/Submitter, a thin gateway): checks the `RunRequest` is well-formed, the caller's role permits the verb (RBAC), the `template_name` is on the allow-list, and the referenced descriptor exists. Admission is a *pure pre-check* — it holds no run state. On pass it forwards to the Tower `Scheduler.Submit`; on fail it rejects before the run ever enters the queue.
+2. **Compile-validation** (Tower L4, the `submitted → validated` FSM edge): evaluates parameter bounds against the *active* descriptor + snapshot, compiles, and attaches the `validation_token`. This is authority-side because it needs the active calibration and bound evaluation.
+
+In v1 (co-located on the Tower) the gateway and scheduler are the same host; the stage boundary is preserved so the EliteDesk split is a deployment move, not a redesign.
+
 ## Run-control verbs
 
 ```proto
 service Scheduler {
-  rpc Submit(RunRequest) returns (RunPlan);
+  rpc Submit(RunRequest) returns (RunPlan);  // called by the admission gateway, not end clients directly
   rpc Cancel(CancelRequest) returns (CancelResponse);
   rpc Status(StatusRequest) returns (stream StatusEvent);
   rpc ListRuns(ListRunsRequest) returns (ListRunsResponse);
@@ -185,7 +194,7 @@ service Scheduler {
   rpc SubmitCalibration(CalibrationDagRequest) returns (DagTraversal);
   rpc PublishSnapshot(PublishRequest) returns (SnapshotResponse);
 
-  rpc AdminApplyDescriptor(DescriptorPatch) returns (DescriptorResponse);
+  rpc AdminPublishDescriptor(DescriptorPublish) returns (DescriptorResponse);  // insert immutable descriptor + append activation; never patches in place
 }
 ```
 
@@ -199,21 +208,22 @@ Idempotency: every mutating verb takes an `idempotency_key`. The scheduler dedup
 | `operator` | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ |
 | `senior_operator` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ | ✓ | ✗ |
 | `admin` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `agent` (automated) | ✗ | ✓ | ✗ | ✓ (scoped to allow-list) | ✗ | ✗ | ✗ | ✗ | ✗ |
+| `agent` (automated) | ✓ (own runs only) | ✓ | ✗ | ✓ (scoped to allow-list) | ✗ | ✗ | ✗ | ✗ | ✗ |
 
 Blast-radius bounds (critique F-17 partial):
 
-1. `mutate_descriptor` writes a new versioned row. Past shots keep the old descriptor; only future shots see the new one.
+1. `mutate_descriptor` inserts a new immutable descriptor row and appends a `descriptor_activations` pointer — it never patches in place. Past shots keep the descriptor they pinned; only future shots see the newly activated one.
 2. `publish_snapshot` is transactional and append-only. A wrong calibration cannot retroactively poison existing data.
 3. `agent` `submit_run` is restricted to a static allow-list of template names; arbitrary templates require operator countersign.
+4. `agent` `view` is scoped to the runs that agent submitted (its own `run_uuid`s) — it can observe its own runs' status/outcome but not the lab-wide run list or other users' runs.
 
 ## Heartbeat + timeout policy
 
 | Source | Period | Miss threshold | Action |
 |---|---|---|---|
-| Device service → scheduler | 1 s | 3 misses | Mark service `UNHEALTHY`; refuse new arms; drain in-flight at next shot boundary |
-| Broker → scheduler | 1 s | 3 misses | Block new submissions; in-flight run continues if OPX side is healthy |
-| Scheduler → broker | 5 s | 2 misses | Broker enters cooldown; no new RT submissions until restored |
+| Device service → orchestrator | 1 s | 3 misses | Mark service `UNHEALTHY`; refuse new arms; drain in-flight at next shot boundary |
+| Broker ↔ orchestrator | (intra-Tower) | OS process-liveness | Both run on the Tower (ADR-0001) — this is local supervisor/process monitoring, **not** a network heartbeat. Broker death → orchestrator marks run `unsafe`, requires Disarm-Arm |
+| Orchestrator (Tower) ↔ EliteDesk gateway/Postgres | 1 s | 3 misses | The real cross-host link. Miss → block new submissions + pause durable mirror; in-flight run continues (run state is Tower-local) |
 | Safety plane → all | hardware watchdog (see §09) | hardware threshold | Independent safe-state action |
 
 ## Error taxonomy

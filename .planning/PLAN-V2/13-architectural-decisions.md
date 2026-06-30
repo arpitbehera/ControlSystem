@@ -30,16 +30,16 @@ ADR template:
 
 ## Seed ADRs
 
-### ADR-0001 — Orchestrator host is EliteDesk; broker host is Tower
-**Status:** Proposed
-**Context:** `PROJECT.md` fixes `PC1` (= HP Z2 Tower) as orchestrator host. Research design doc places broker on Tower for latency. These can coexist if "orchestrator" is split into a *control-plane* part (scheduler / compiler / DAG runner / DB) and a *latency-critical* part (broker / framegrabber / GPU pipeline / spool).
-**Decision:** Scheduler, compiler, DAG runner, Postgres on EliteDesk. Broker process, framegrabber driver, GPU pipeline, data-lake writer, durable spool on Tower. The Tower's role in run ownership is delegated *broker only*; "run lifecycle ownership" in the `PROJECT.md` sense lives at the scheduler on EliteDesk.
+### ADR-0001 — Tower holds run-execution authority; EliteDesk validates + stores
+**Status:** Accepted
+**Context:** `PROJECT.md` fixes `PC1` (= HP Z2 Tower) as orchestrator host and says run ownership stays on the Tower and the orchestrator is not split across hosts. The rearrangement loop is PCIe-bound to the Tower (BitFlow + RTX 4000 Ada, GPUDirect). The A8 risk is that durable history is lost if the Tower (which executes runs) also holds the only copy of the calibration registry / metadata. The resolution is **not** to move run authority off the Tower, but to separate *authority over execution* (Tower) from *durable storage + job validation* (EliteDesk).
+**Decision:** The **Tower is the run-execution authority** — it hosts the Orchestrator (scheduler, run State FSM, lifecycle coordinator, calibration-DAG runner), the Compiler, and the Broker (OPX client, framegrabber, GPU pipeline, raw spool). Only the Tower can advance a run's state. The **EliteDesk is a Job Validator/Submitter and the durable store** — it validates `RunRequest` → `RunPlan` against the `DeviceDescriptor`, submits job requests to the Tower, and hosts Postgres (metadata DB + calibration registry) plus the off-host raw replica. The EliteDesk cannot advance run state. **In v1 all roles are co-located on the Tower**; physical distribution of the Validator + Postgres + replica to the EliteDesk is a later deployment step, not a redesign.
 **Alternatives:**
-- Pure-Tower orchestrator (`PROJECT.md` literal reading): risks A8.
-- Pure-EliteDesk orchestrator including broker: adds a cross-host hop on the rearrangement loop.
-**Evidence:** GPUDirect for Video requires PCIe co-location (BitFlow + RTX 4000 Ada). Tower has the framegrabber. Phase 0A W0A-2 measures the actual GPUDirect path.
-**Consequences:** Two hosts must agree on run state via Postgres-backed FSM. Tower failure halts in-flight shot but does not corrupt history.
-**Reversal condition:** Phase 0A reveals an unsolvable bottleneck on Tower → consider relocating the GPU pipeline and broker to a new host that retains PCIe co-location.
+- Orchestrator (scheduler/FSM) on EliteDesk, broker on Tower (earlier draft of this ADR): contradicts `PROJECT.md` ("Tower owns run, do not split orchestrator"), and puts a cross-host hop between run-authority and the latency-critical executor. Rejected.
+- Pure-Tower with Postgres also on Tower as the *only* copy: full A8 exposure — a Tower disk loss takes history with it. Rejected for the distributed end-state (acceptable transiently in v1 because the EliteDesk replica is the mitigation once distributed).
+**Evidence:** GPUDirect for Video requires PCIe co-location (BitFlow + RTX 4000 Ada); the framegrabber is on the Tower, so execution authority colocated with execution avoids a cross-host hop on the loop. Phase 0A W0A-2 measures the actual GPUDirect path.
+**Consequences:** Run state lives on the Tower; a Tower crash halts the in-flight shot (shot-boundary recovery only) but the EliteDesk store preserves history once distributed. The Validator must be a pure function of `DeviceDescriptor` + `RunRequest` so it can run on either host. v1 co-location means the A8 benefit is not realized until the distribution step — track this as a known v1 gap.
+**Reversal condition:** Phase 0A reveals an unsolvable bottleneck on the Tower → consider relocating the GPU pipeline + broker (and therefore execution authority) to a new host that retains PCIe co-location.
 
 ### ADR-0002 — Rearrangement wire message: `RearrangementBatchV1`
 **Status:** Proposed
@@ -55,7 +55,7 @@ ADR template:
 ### ADR-0003 — Calibration model: immutable `calibration_snapshots`
 **Status:** Proposed
 **Context:** Critique F-04 — original "calibration_id" was ambiguous between a node execution, a parameter version, and a published set.
-**Decision:** Separate tables: `calibration_executions` (candidates), `parameter_versions` (immutable typed values), `calibration_snapshots` (immutable published sets). Runs pin to one `snapshot_id`.
+**Decision:** Separate tables: `calibration_executions` (candidates), `parameter_versions` (immutable typed values), `calibration_snapshots` (immutable published sets). Runs pin to one `snapshot_id`. **Currency ("which snapshot/descriptor is active") is modeled as an append-only activation log** (`snapshot_activations`, `descriptor_activations`): the active row is the latest activation per lineage. Immutable rows are never mutated and carry no `valid_until` — validity intervals are derived from successive activations. Publishing = insert immutable snapshot + append one activation row in a single transaction.
 **Alternatives:**
 - "Registry with valid_until": closing an interval is a mutation; loses concurrent-publication safety.
 - Per-shot snapshot row: would multiply rows by O(snapshots × parameters); rejected for size.
@@ -186,6 +186,17 @@ ADR template:
 **Evidence:** Research design doc §1.3.
 **Consequences:** Engineering cost upfront; long-run portability.
 **Reversal condition:** QM open-sources QUAlibrate or offers stable supported API → re-evaluate.
+
+### ADR-0016 — Run-vs-compute GPU mutex is Tower-local; Postgres is audit only
+**Status:** Accepted
+**Context:** The Tower's single RTX 4000 Ada is shared between the latency-critical broker run-pipeline and the non-loop compute service (offline reanalysis, calibration analyses). The two must never touch the GPU concurrently. An earlier draft stored this mutex in EliteDesk Postgres, held by the scheduler. With run-execution authority now on the Tower (ADR-0001), arbitrating a Tower-local resource via a remote DB re-introduces a cross-host dependency on the critical path.
+**Decision:** The run-vs-compute lock is a **Tower-local named OS mutex**, owned by the orchestrator (now Tower-resident), acquired synchronously whenever a run is `armed`/`executing`. It is authoritative; no network is in the acquisition path. On holder death it releases via abandoned-mutex semantics. Run preempts compute: the orchestrator signals compute to checkpoint + release, then acquires. Postgres records mutex transitions as **append-only audit only**, never the lock itself.
+**Alternatives:**
+- Postgres advisory lock held by the scheduler (earlier draft): couples GPU arbitration to a remote host; partition causes split-brain (block a safe run, or proceed unconfirmed); adds a TCP+txn round-trip to arming; crash-release semantics murky across a proxied connection. Rejected.
+- In-GPU/CUDA-context exclusivity only: doesn't coordinate two separate OS processes cleanly, and gives no audit trail. Rejected.
+**Evidence:** Both GPU contenders are Tower processes; zero EliteDesk processes touch the GPU. Failure-domain principle: a lock belongs with the resource it guards and the authority that schedules it.
+**Consequences:** GPU arbitration survives an EliteDesk/Postgres outage. The audit write is best-effort and off the critical path — a lost audit row never blocks a run. Same split as ADR-0001: execution state on the Tower, durable history on the EliteDesk.
+**Reversal condition:** The GPU pipeline relocates to a host that is not the execution authority → the mutex moves with the GPU, and the arbitration owner is reconsidered.
 
 ## ADR governance
 

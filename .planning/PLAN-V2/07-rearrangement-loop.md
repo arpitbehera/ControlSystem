@@ -124,17 +124,46 @@ Per critique F-09, process discipline is *measured* before priorities are pinned
 | Process | Priority | CPU affinity | Notes |
 |---|---|---|---|
 | Broker | `HIGH_PRIORITY_CLASS` (raise to RT only after measured benefit) | cores 0–7 of 24 P-cores | single Python interpreter |
-| Compute service | `NORMAL_PRIORITY_CLASS` | cores 8–15 | gated by scheduler mutex during armed/executing |
+| Compute service | `NORMAL_PRIORITY_CLASS` | cores 8–15 | gated by the Tower-local orchestrator mutex during armed/executing (ADR-0016) |
 | Andor service | `NORMAL_PRIORITY_CLASS` | cores 16–19 | not in loop; non-loop snaps only |
 | Data-lake writer | `BELOW_NORMAL_PRIORITY_CLASS` | cores 20–23 | asynchronous from loop |
 | Anything else | normal | unbinned | should be nothing on the broker host |
 
-Mutex semantics: the scheduler holds a row-level lock on a Postgres `broker_resource` row whenever any run is `armed` or `executing`. The compute service polls before running heavy jobs; failures are reported, not buffered.
+Mutex semantics: the orchestrator (Tower-resident) holds a **Tower-local named OS mutex** whenever any run is `armed` or `executing`. The compute service must acquire it before running heavy GPU jobs and fails fast if it cannot. Acquisition is synchronous and host-local — no Postgres round-trip on the path. Postgres records mutex transitions as append-only audit only. See ADR-0016.
 
 GPU buffer ownership (critique F-09 unresolved → Phase 0A deliverable):
 - Broker owns BitFlow buffer registration during a run.
 - Andor SDK ownership during a run = closed (operator cannot trigger non-loop snaps).
 - The exact handoff path between Andor SDK initialization (driver service startup) and BitFlow's in-process consumption (broker capture) is benchmarked in Phase 0A. If the SDK ownership model requires Andor SDK to hold the camera handle, the handoff is documented as a hard prerequisite to broker startup; otherwise, the broker may hold the handle directly.
+
+## Canonical timing spans (single source of truth)
+
+All latency budgets in this plan (00, 05, 07) are stated against these named spans for **one rearrangement loop**. A shot runs ≤ 2 loops.
+
+```
+ camera                      occupation                       AOD                chirp
+ trigger                       ready                         start               done
+   │            │                │            │        │        │                  │
+   ├─ t_expose ─┼─── t_readout ──┼─ t_compute ┼ t_insert┼ (gap) ┼──── t_execute ───┤
+   │  ~10 ms    │   ~7 ms (det.)  │  best-effort, non-RT │       │  physics-limited  │
+   │            │  (occ. matrix   │                      │       │                  │
+   │            │   pipelined in) │                      │       │                  │
+```
+
+| Span | Meaning | Determinism | Typical |
+|---|---|---|---|
+| `t_expose` | atoms exposed onto EMCCD | fixed | ~10 ms |
+| `t_readout` | row-by-row sensor readout; occupation-matrix generation pipelined inside | deterministic | ~7 ms (35 µs/row × 200) |
+| `t_compute` | move computation (assignment) from the occupation matrix | best-effort, non-RT | sub-ms |
+| `t_insert` | encode + `insert_input_stream` transit to PPU FIFO | best-effort | Phase 0A measures |
+| `t_execute` | AOD waveform playback (chirp) | deterministic (PPU) | physics-limited |
+
+**Budget reconciliation:**
+- **Doc 00 / CONTEXT "≤ 5 ms compute+execute slot"** = `t_compute + t_insert + t_execute`, measured from **occupation-ready**. The pseudo-RT fixed wait-slot.
+- **Doc 07 acceptance #1 "frame-trigger → AOD-start, p99 ≤ 8 ms"** = `t_readout + t_compute + t_insert`, measured from **camera trigger** (≈ 7 ms readout + ~1 ms compute+insert). Excludes `t_expose` and `t_execute`.
+- **Per-loop wall-clock** ≈ `t_expose + t_readout + t_compute + t_insert + t_execute` ≈ 22 ms; ≤ 2 loops/shot ≈ 44 ms; well inside the ~2 s atom lifetime.
+
+The two budgets bundle *different* physical legs (00 bundles `t_execute`; 07 bundles `t_readout`); both share `t_compute + t_insert`. Neither is wrong — always state which span a measurement targets.
 
 ## Latency budget (estimates pending Phase 0A measurement)
 
@@ -161,6 +190,7 @@ The rearrangement loop contract is **provisional** until these pass:
 3. **30-minute no-drop acquisition**: zero `Statistic_Failed_Buffer_Count` (or vendor equivalent) under realistic competing CPU/IO load on the Tower.
 4. **Fault injection**: kill broker mid-loop, drop input-stream payload, send malformed BATCH — PPU enters safe state in every case; no analog out beyond bounds; recovery requires operator `Disarm`/`Arm` cycle.
 5. **Process discipline measurement**: p99/p99.9 with broker at `HIGH_PRIORITY_CLASS` vs `REALTIME_PRIORITY_CLASS` vs default. Accept only the setting that improves p99.9 without dropped frames or system instability.
+6. **CPU-baseline comparison (GPU stays the committed path)**: measure `t_compute` for classify+assign on a **CPU-only path** (BitFlow → CPU RAM, SIMD threshold + greedy/auction assignment) at current array size *and* projected 1000-atom ROI, against the GPUDirect→CUDA path. The GPU path remains the architecture; this is a comparison datapoint that (a) quantifies the GPU's margin, (b) provides a fallback baseline if a GPUDirect/BitFlow integration problem surfaces, and (c) records whether compute is ever the bottleneck vs `t_insert` + `t_execute`. The `RearrangementBatchV1` wire contract is identical regardless of compute source, so this measurement costs no contract change.
 
 ## Scaling to 1000 atoms (Phase 5+)
 

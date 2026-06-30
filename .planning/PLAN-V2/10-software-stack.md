@@ -68,8 +68,8 @@ Rejected:
 | Integration | **pytest** + dockerized Postgres + fake broker / fake OPX |
 | Fault injection | **pytest** + `pytest-toxiproxy` or equivalent for network faults |
 | Hardware smoke | dedicated `tests/hardware/` excluded from CI; run manually on bring-up |
-| Coverage | `pytest-cov`; CI gate at 80% on `src/orchestrator/`, `src/device_servers/`, `src/compiler/` |
-| Lint / format | **ruff** + **black** + **mypy --strict** on orchestrator, compiler, contracts |
+| Coverage | `pytest-cov`; CI gate at 80% on `src/orchestrator/`, `src/device_servers/`, `src/compiler/`, and the **pure-logic paths of `src/broker/`** (`encode_batch`, sequence-continuity / snapshot-hash validation, spool fsync + replay) exercised against the fake-OPX. Hardware-interop glue (BitFlow/Andor/CUDA) is excluded and covered by `tests/hardware/` smoke. |
+| Lint / format | **ruff** + **black** + **mypy --strict** on orchestrator, compiler, contracts, **and `src/broker/`** (the broker is latency-critical; its logic must be the most typed, not the least) |
 
 Contract tests are the architectural deliverable per `REQUIREMENTS.md` TEST-01. They are parametrized across `[fake_camera, fake_slm, fake_psu, fake_lock, fake_arduino, fake_opx]` in v1; new device classes opt in by passing the same test set.
 
@@ -125,7 +125,7 @@ Contract tests are the architectural deliverable per `REQUIREMENTS.md` TEST-01. 
 │   │   ├── operator_cli/
 │   │   ├── readonly_backend/
 │   │   └── readonly_frontend/
-│   └── safety/              # safety token issuance + validators
+│   └── safety/              # validation_token issuance + validators; safe-state definitions
 ├── tests/
 │   ├── contract/            # lifecycle FSM contract tests
 │   ├── unit/

@@ -20,25 +20,26 @@ Total: ~12–18 months for v1; v2 features (REMOTE-01, UI-02, DATA-01, DEV-01) f
 
 **Workstreams (parallel):**
 
-1. **W0A-1: `insert_input_stream` latency measurement.** Write a minimal QUA program that loops `advance_input_stream → get_timestamp → output_stream`. Python side feeds payloads of {16 B, 256 B, 1 KB, 8 KB, target BATCH_BYTES}. Collect ≥ 10⁵ samples per size. Report p50/p95/p99/p99.9/max.
-2. **W0A-2: GPUDirect for Video bring-up.** Confirm BitFlow Axion 1xB + RTX 4000 Ada GPUDirect path works in a single in-process Python broker. Measure DMA-to-VRAM time, classifier kernel time, encoder time, host pickup time. Document Andor SDK ↔ BitFlow handoff (critique F-09).
+1. **W0A-1: `insert_input_stream` latency measurement.** Write a minimal QUA program that loops `advance_input_stream → get_timestamp → output_stream`. Python side feeds payloads of {16 B, 256 B, 1 KB, 8 KB, target BATCH_BYTES}. Collect ≥ 10⁵ samples per size. Report p50/p95/p99/p99.9/max. Report this as the `t_insert` span (§07 canonical spans) so it composes with W0A-2's `t_compute` and the measured `t_readout`/`t_execute` into the §00 ≤ 5 ms compute+execute budget.
+2. **W0A-2: GPUDirect for Video bring-up + CPU baseline.** Confirm BitFlow Axion 1xB + RTX 4000 Ada GPUDirect path works in a single in-process Python broker. Measure each canonical span (§07): DMA-to-VRAM, `t_compute` (classifier + assignment), encoder, host pickup. **Also measure a CPU-only `t_compute` baseline** (BitFlow → CPU RAM, SIMD threshold + greedy/auction assignment) at current array size and projected 1000-atom ROI. GPU stays the committed path (ADR-0002 / §07); the CPU baseline quantifies the GPU's margin and provides a fallback datapoint. Document Andor SDK ↔ BitFlow handoff (critique F-09).
 3. **W0A-3: Process-discipline study.** Compare broker priorities (`NORMAL`, `HIGH`, `REALTIME`) and CPU pinning configurations against p99/p99.9 latency and dropped frames. Pick the lowest-priority config that meets the latency target without instability.
 4. **W0A-4: Safety-plane independence test.** Wire a temporary hardware E-stop into shutter + RF amp enable lines. Verify that pressing it brings shutters closed and RF off within sub-ms, with no software in the path. Confirm that killing the broker also brings PPU into safe state within one shot via the QUA watchdog.
 5. **W0A-5: NTP drift baseline.** Run a 24 h cold-start drift measurement across all four lab hosts.
 
 **Exit gates (must all pass to enter Phase 1):**
 
-- W0A-1: `insert_input_stream` p99 ≤ 5 ms at target payload size, or a concrete escape plan (multi-batch / RLE) documented.
+- W0A-1: `t_insert` (p99) is small enough that the **composed** budget holds — `t_compute + t_insert + t_execute` p99 ≤ 5 ms from occupation-ready (§00, §07 spans), with `t_execute` (AOD chirp) and `t_compute` from W0A-2 folded in. A bare `insert_input_stream` p99 ≤ 5 ms is **not** sufficient on its own (insert is one span of the budget, not the whole). If the composed budget fails, a concrete escape (multi-batch / RLE / tighter chirp) is documented.
 - W0A-2: 30-minute no-drop acquisition under realistic load; documented SDK ownership model.
 - W0A-3: chosen priority/affinity setting produces measurable p99.9 improvement over default.
 - W0A-4: independent safe-state reached in every fault-injection scenario in §09.
 - W0A-5: sustained NTP offset ≤ 10 ms across all hosts.
 
-**Deliverables:**
+**Deliverables** (ADR numbers match the §13 seed list):
 
-- `docs/adr/0001-broker-placement.md` — ratifies (or revisits) Tower-resident broker.
-- `docs/adr/0002-rearrangement-batch-v1.md` — locks the wire-message shape based on measurement.
-- `docs/adr/0003-process-discipline.md` — locks priority + affinity.
+- `docs/adr/0001-execution-authority-and-broker-placement.md` — ratifies (or revisits) ADR-0001 (Tower = execution authority + broker; EliteDesk = validate + store) against the measured GPUDirect path.
+- `docs/adr/0002-rearrangement-batch-v1.md` — locks ADR-0002 wire-message shape based on measurement.
+- `docs/adr/0010-broker-process-discipline.md` — locks ADR-0010 priority + affinity from W0A-3.
+- `docs/adr/0016-gpu-mutex-locality.md` — confirms ADR-0016 (Tower-local mutex) under the measured run+compute contention.
 - `network/MINIMAL_OPX.md` — minimal cold-bring-up procedure (per research design doc §3.12.6).
 - `tests/hardware/` — every Phase 0A test reified as a re-runnable script.
 
@@ -49,15 +50,15 @@ Maps to `REQUIREMENTS.md`: PLAT-01, PLAT-02, PLAT-03, RUN-01, RUN-02, RUN-03, SA
 **Workstreams:**
 
 1. **W1-1: Proto3 contracts.** Define `lifecycle.proto`, `run_model.proto`, `safety.proto`, `scheduler.proto`. Wire schema review with the team. No code generation until reviewed.
-2. **W1-2: Scheduler skeleton.** Long-running Python process on EliteDesk. Implements gRPC server for `Submit`, `Cancel`, `Status`, `ListRuns`. State FSM persisted in Postgres. Heartbeat consumer.
-3. **W1-3: Postgres schema v1.** Tables: `device_descriptors`, `runs`, `shots`, `raw_manifests`. Alembic migrations.
+2. **W1-2: Orchestrator skeleton.** Long-running Python process on the **Tower** (run-execution authority, ADR-0001; in v1 everything is co-located on the Tower). Implements gRPC server for `Submit`, `Cancel`, `Status`, `ListRuns`. State FSM held Tower-local-authoritative and mirrored to Postgres. Heartbeat consumer. The EliteDesk Job Validator/Submitter is a thin admission gateway in front of `Submit`.
+3. **W1-3: Postgres schema v1.** Tables: `device_descriptors`, `descriptor_activations`, `runs`, `shots`, `raw_manifests`. Alembic migrations. (Descriptors are immutable; currency is the `descriptor_activations` append-only pointer — ADR-0003, no `valid_until`.)
 4. **W1-4: Lifecycle contract base.** `src/device_servers/_base/` provides a `LifecycleService` abstract class + FSM + heartbeat. Contract test suite in `tests/contract/`.
 5. **W1-5: One fake device service.** `device_servers/fake_camera/` implements the contract; passes contract tests.
 6. **W1-6: Broker shell.** Tower process that connects to OPX via QM SDK and exposes a `Broker` gRPC service to the scheduler. No rearrangement logic yet — just `Configure / Arm / Start / Stop / Disarm`.
 7. **W1-7: Operator CLI.** Minimal `lab` CLI with `submit-run`, `status`, `cancel`, `list-runs`.
 
 **Exit gate:**
-1. Orchestrator starts on EliteDesk; exposes gRPC.
+1. Orchestrator starts on the Tower (v1 co-located); exposes gRPC. EliteDesk admission gateway forwards a `Submit`.
 2. Fake camera service registers, returns typed `Capabilities` + `Health`.
 3. `Submit(RunRequest)` validates into a `RunPlan` and persists.
 4. State machine transitions visible via `Status` stream.
@@ -87,7 +88,7 @@ Maps to `REQUIREMENTS.md`: SAFE-02, CFG-01.
 
 **Workstreams:**
 
-1. **W3-1: Calibration snapshot model.** Tables: `dag_nodes`, `calibration_executions`, `parameter_versions`, `calibration_snapshots`, `execution_bundles`. Per §05 and §08.
+1. **W3-1: Calibration snapshot model.** Tables: `dag_nodes`, `calibration_executions`, `parameter_versions`, `calibration_snapshots`, `snapshot_activations`, `execution_bundles`. Per §05 and §08. (Snapshots immutable; currency is the `snapshot_activations` append-only pointer — no parent-chain "head", no `valid_until`.)
 2. **W3-2: Snapshot publication transaction.** API + permissions per §08.
 3. **W3-3: Execution bundle generator.** Compiler attaches a bundle to every run.
 4. **W3-4: Durable shot-commit protocol.** Broker local spool, fsync semantics, gRPC idempotency, off-host replica ack loop. Per §05.
@@ -141,11 +142,11 @@ Maps to `REQUIREMENTS.md`: HW-02.
 
 1. **W6-1: Choice of first remote device.** Recommended: SLM on Mini (`PC2`) — exercises the cross-host orchestration path most fully.
 2. **W6-2: Remote-device adapter.** `src/device_servers/slm/` runs on Mini; exposes the same lifecycle contract over gRPC.
-3. **W6-3: Cross-host smoke tests.** Validate that the scheduler on EliteDesk drives the SLM service on Mini through the same code path as a local fake.
+3. **W6-3: Cross-host smoke tests.** Validate that the Tower orchestrator drives the SLM service on Mini through the same code path as a local fake. (Phase 6 is also where the EliteDesk Validator + Postgres are first physically split off the Tower, per ADR-0001 — cross-host orchestration and the store-distribution step are validated together.)
 4. **W6-4: SLM-integrated demo.** A run that uses an SLM-defined initial geometry alongside the rearrangement loop.
 
 **Exit gate:**
-1. SLM service on Mini is discovered and orchestrated from EliteDesk; contract tests pass against the real device.
+1. SLM service on Mini is discovered and orchestrated from the Tower orchestrator; contract tests pass against the real device.
 2. A run that uses both Andor (Tower) and SLM (Mini) executes end-to-end with full provenance.
 3. The platform contract did not change to accommodate the remote device.
 

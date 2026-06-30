@@ -43,10 +43,10 @@ Risks fall into four bands by severity × likelihood. Each carries a *mitigation
 
 ## Reliability / failure-domain risks
 
-### B6 — Single fast box (A8) — Tower is broker + framegrabber + GPU + data lake
+### B6 — Single fast box (A8) — Tower is orchestrator + broker + framegrabber + GPU + data lake
 *Likelihood:* certain · *Severity:* high
-- **Symptom:** Tower failure halts all experiments.
-- **Mitigation:** process discipline (broker isolation); calibration registry + scheduler on EliteDesk; off-host raw-data replication; durable shot-commit protocol; quarterly fire-drill restore test.
+- **Symptom:** Tower failure halts all experiments (the Tower is the execution authority, ADR-0001).
+- **Mitigation:** process discipline (broker isolation); **durable calibration registry + metadata DB on EliteDesk** (the Tower runs the orchestrator but holds no durable history once distributed); off-host raw-data replication; durable shot-commit protocol; quarterly fire-drill restore test. **v1 gap:** until the EliteDesk split (Phase 6), everything is co-located on the Tower, so full A8 protection is not yet realized — see ADR-0001 v1 caveat.
 - **Measurement:** RTO drills quarterly; record elapsed times.
 - **Escape:** stocked spare Tower-class workstation with pre-installed image; documented one-day swap procedure.
 
