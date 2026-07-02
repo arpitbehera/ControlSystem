@@ -24,7 +24,7 @@ Every architectural decision below traces to one or more of these seams.
 │     • Scripted clients (agents) with allow-list templates           │
 ├─────────────────────────────────────────────────────────────────────┤
 │ L5  Scheduler & Orchestrator                                        │
-│     • RunRequest → RunPlan validator                                │
+│     • Dequeue accepted jobs → compile-validation → RunPlan          │
 │     • Run state machine (prepared/armed/executing/committed/…)      │
 │     • Calibration DAG traversal runner                              │
 │     • Lifecycle coordinator over the shared device contract         │
@@ -72,7 +72,7 @@ Every architectural decision below traces to one or more of these seams.
 | Calibration DAG | L5 + L3 | DAG traversal at L5 (Tower); persistence at L3 (EliteDesk store) |
 | Per-shot snapshot | L3 → L1 | `snapshot_id` resolved at compile time, embedded in shot record |
 
-> **Authority note:** L5 (Scheduler + State FSM + DAG runner) and the Broker both run on the **Tower** — the Tower is the run-execution authority. The **EliteDesk** hosts L3's durable store and acts as Job Validator/Submitter only; it cannot advance run state. In v1 all of this is **co-located on the Tower**; the EliteDesk split is a later deployment step. See ADR-0001.
+> **Authority note:** L5 (Scheduler + State FSM + DAG runner) and the Broker both run on the **Tower** — the Tower is the run-execution authority. The **EliteDesk** owns the pending job queue, hosts L3's durable store, and acts as Admission Validator/Submitter; it cannot advance run state. `v1-dev` may co-locate these roles on the Tower for bring-up/testing; `v1-lab` moves Admission Validator + Postgres + replica to the EliteDesk before routine scientific operation. See ADR-0001.
 | Driver-per-instrument | L2 | Each device-server is one Windows service or one Python long-running process |
 | Pseudoclock as timing root | L1 | OPX+ PPU |
 
@@ -119,7 +119,7 @@ Default rule: **bulk stays local unless a concrete reason requires movement**. R
        │                                                                       │
        │   Broker (Tower) — owns OPX client, framegrabber, GPU pipeline       │
        │                                                                       │
-       │   EliteDesk = Job Validator/Submitter + durable store (no authority) │
+       │   EliteDesk = Admission Validator + pending queue + durable store    │
        └────┬────────────────┬──────────────────┬──────────────────────────────┘
             │ gRPC           │ gRPC             │ gRPC + libs
             ▼                ▼                  ▼
@@ -143,26 +143,26 @@ Default rule: **bulk stays local unless a concrete reason requires movement**. R
                        │ Andor + BitFlow + GPUDirect │  (data plane,
                        │ → Tower RTX 4000 Ada        │   never leaves
                        │ → CUDA classifier+assign    │   the Tower)
-                       │ → insert_input_stream       │
+                       │ → QUA input-stream push     │
                        └─────────────────────────────┘
 ```
 
 ## Process layout (Tower = orchestrator + broker; EliteDesk = validator + store)
 
-> **v1 deployment:** all processes below run **co-located on the Tower** during development and testing. The EliteDesk-resident processes move off-host only in a later distribution step; their role boundary is fixed now so the move is a deployment change, not a redesign. See ADR-0001.
+> **v1 deployment:** `v1-dev` may run all processes below **co-located on the Tower** during bring-up and testing. `v1-lab` moves the EliteDesk-resident processes off-host before routine scientific operation; their role boundary is fixed now so the move is a deployment change, not a redesign. See ADR-0001.
 
 On the Tower (`PC1`), in order of run-criticality — **the Tower is the run-execution authority**:
 
-1. **Orchestrator process** (Python long-running process). State FSM, lifecycle coordinator, queue, calibration-DAG runner. **Owns run state — only the Tower can advance a run.**
+1. **Orchestrator process** (Python long-running process). State FSM, lifecycle coordinator, active execution queue, calibration-DAG runner. **Owns run state — only the Tower can advance a run.**
 2. **Compiler service** (in-process with the orchestrator in v1; can be split later).
-3. **Broker process** (single Python interpreter, pinned CPU affinity, no GUI). Owns `QuantumMachinesManager`, BitFlow capture, GPU pipeline, `insert_input_stream`, durable local raw spool. *Latency-critical; one process per run.* Holds no durable authority of its own — it is the orchestrator's RT execution arm.
+3. **Broker process** (single Python interpreter, pinned CPU affinity, no GUI). Owns `QuantumMachinesManager`, BitFlow capture, GPU pipeline, QUA input-stream pushes, durable local raw spool. *Latency-critical; one process per run.* Holds no durable authority of its own — it is the orchestrator's RT execution arm.
 4. **Andor service** (separate Windows service). Owns Andor SDK; serves non-loop snaps. Idle / suspended during armed runs.
 5. **Compute service** (separate process, same GPU). Non-loop GPU work — offline reanalysis, calibration analyses. **Operator-visible mutex prevents concurrent run + compute.**
 6. **Data lake writer** (separate process). Consumes shot records from the broker via shared-memory queue, writes HDF5 + checksums asynchronously.
 
-On the EliteDesk — **Job Validator/Submitter + durable store, no run authority**:
+On the EliteDesk — **Admission Validator/Submitter + pending job queue + durable store, no run authority**:
 
-1. **Job Validator/Submitter** (Python long-running process). Validates `RunRequest` → `RunPlan` against the `DeviceDescriptor`, submits job requests to the Tower orchestrator. Cannot advance run state.
+1. **Admission Validator/Submitter** (Python long-running process). Performs submit-time semantic validation, records `submitted_at`, owns the pending job queue, and submits accepted jobs to the Tower orchestrator. Cannot compile, arm, execute, or advance run state.
 2. **Postgres** (local NVMe). Metadata DB + calibration registry — durable history that survives a Tower crash.
 3. **Read-only dashboard backend** (FastAPI on a separate port).
 4. **Off-host raw replica** target.
@@ -181,7 +181,7 @@ On `PC3` (Lenovo ThinkCentre):
 
 ## What this orientation buys
 
-- **A8 mitigation**: the Tower is the run-execution authority but never holds the durable calibration registry / metadata DB (those live in the EliteDesk store) — a Tower crash kills an in-flight shot, not history.
+- **A8 mitigation**: in `v1-lab`, the Tower is the run-execution authority but does not hold the only durable calibration registry / metadata DB (those live in the EliteDesk store) — a Tower crash kills an in-flight shot, not history.
 - **Latency-first**: the rearrangement loop is entirely in one PCIe topology; no cross-host hop on the critical path.
 - **Failure-domain separation**: scheduler and DB on a different host than the loop; backup target on yet another storage domain.
 - **Conway-resistant**: layered seams survive personnel turnover (`amo-control-system-design.md` §2.3 / A20).

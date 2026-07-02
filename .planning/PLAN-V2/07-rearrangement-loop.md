@@ -25,7 +25,7 @@ Per `amo-control-system-design.md` §3.5 (with critique F-02, F-06, F-07 correct
        │ cudaMemcpyAsync → pinned host memory (~10 µs)
        ▼
 [Broker Python process, Z2 Tower]         — single interpreter, RT priority
-       │ job.insert_input_stream("rearr_batch", batch_bytes)
+       │ job.push_to_input_stream("rearr_batch", batch_words)
        ▼
 [OPX server (QM router, VLAN 50)]
        │
@@ -50,18 +50,29 @@ Per `amo-control-system-design.md` §3.5 (with critique F-02, F-06, F-07 correct
 ## The wire message (critique F-02, F-07)
 
 ```python
-import struct
-
 PROTOCOL_VERSION = 1
-N_MAX_MOVES = 1024            # Phase 0A measurement determines target; oversize OK
-MOVE_STRUCT = "<4HHfI"        # src_x, src_y, tgt_x, tgt_y (site IDs); group_id;
-                              # t_ramp_us (float32); flags (u32)
-MOVE_BYTES = struct.calcsize(MOVE_STRUCT)
-HEADER_STRUCT = "<HHIIIQI"    # protocol_version, _pad, sequence_no, n_moves,
-                              # deadline_ppu_ticks_lo, deadline_ppu_ticks_hi,
-                              # snapshot_hash32  (32-bit truncated from sha256)
-HEADER_BYTES = struct.calcsize(HEADER_STRUCT)
-BATCH_BYTES = HEADER_BYTES + N_MAX_MOVES * MOVE_BYTES   # fixed-width
+N_MAX_MOVES = 1024            # Provisional placeholder. Phase 0A must derive this from descriptor geometry + assignment policy, then confirm OPX/QOP accepts BATCH_WORDS and latency stays within budget.
+
+# QUA client input streams are homogeneous typed vectors. The v1 wire layout is
+# therefore a fixed-width QUA-native int vector, not a packed mixed binary blob.
+HEADER_WORDS = 13
+MOVE_WORDS = 6
+BATCH_WORDS = HEADER_WORDS + N_MAX_MOVES * MOVE_WORDS  # 6157 words (~24.6 KB) at N_MAX_MOVES=1024
+
+# Header word offsets
+OFF_PROTOCOL_VERSION = 0
+OFF_SEQUENCE_NO = 1
+OFF_N_MOVES = 2
+OFF_DEADLINE_TICKS_LO = 3
+OFF_DEADLINE_TICKS_HI = 4
+OFF_SNAPSHOT_HASH_LO = 5
+OFF_SNAPSHOT_HASH_HI = 6
+OFF_DESCRIPTOR_HASH_LO = 7
+OFF_DESCRIPTOR_HASH_HI = 8
+OFF_LOOP_INDEX = 9
+OFF_MAX_LOOPS = 10
+OFF_IDEAL_MOVES = 11
+OFF_HEADER_FLAGS = 12
 ```
 
 | Field | Meaning |
@@ -69,30 +80,59 @@ BATCH_BYTES = HEADER_BYTES + N_MAX_MOVES * MOVE_BYTES   # fixed-width
 | `protocol_version` | Bumped on incompatible changes. PPU rejects unknown versions into safe state |
 | `sequence_no` | Monotone per run. PPU verifies `sequence_no == last + 1`; mismatch → safe state |
 | `n_moves` | Number of valid moves in the padded array. Always ≤ N_MAX_MOVES |
-| `deadline_ppu_ticks` | PPU clock tick by which the chirp must start. Missed deadline → safe state |
-| `snapshot_hash32` | First 32 bits of `calibration_snapshot.id`-hash. PPU validates that the in-flight snapshot matches |
+| `deadline_ppu_ticks_{lo,hi}` | PPU clock tick by which the chirp must start, encoded as two 32-bit words. Missed deadline → safe state |
+| `snapshot_hash64_{lo,hi}` | First 64 bits of the pinned `calibration_snapshot.id` hash, encoded as two 32-bit words. PPU validates that the in-flight snapshot matches compiled constants |
+| `descriptor_hash64_{lo,hi}` | First 64 bits of the pinned `device_descriptor.id` or geometry hash, encoded as two 32-bit words. PPU validates that site IDs are interpreted against the compiled geometry |
+| `loop_index` | Zero-based rearrangement-loop index within the shot |
+| `max_loops` | Compiled hard maximum for this shot; v1 nominally 2, hard maximum 3 |
+| `ideal_moves` | Number of moves the assignment stage wanted to emit before truncation / partial degradation |
+| `header_flags` | Reserved; must be zero in v1 |
 | `moves[i].src_{x,y}` | Source site ID in the descriptor's lattice index space (not raw coords) |
 | `moves[i].tgt_{x,y}` | Target site ID |
 | `moves[i].group_id` | Concurrency group; moves in the same group play in parallel where possible |
-| `moves[i].t_ramp_us` | Per-move ramp time (float32, microseconds) |
+| `moves[i].t_ramp_ticks` | Per-move ramp time in OPX clock ticks; no float parsing in QUA |
 | `moves[i].flags` | Bit 0: "force pause for analysis"; bit 1: "abort if any prior move in group failed"; remaining reserved |
 
-The message is **fixed-width**. The QUA input stream is declared once with size `BATCH_BYTES` and never resized. `n_moves` carried inside the payload (not on a separate IO variable) — this resolves the critique F-02 atomicity bug.
+Partial move-sets are valid only when the batch arrives before `deadline_ppu_ticks` and passes all header/bounds checks. The PPU validates `n_moves <= N_MAX_MOVES` but intentionally allows `ideal_moves > N_MAX_MOVES`: that is the explicit truncation signal when the assignment wanted more moves than the contract can carry. A valid on-time batch with `n_moves < ideal_moves` may play as a best-effort partial and let the next rearrangement loop handle remaining atoms. A missing batch, late batch, malformed header, sequence mismatch, snapshot/descriptor mismatch, or out-of-bounds move is a safety event: PPU enters safe state and does not play the chirp. `ideal_moves` and `truncated = ideal_moves > n_moves` are persisted in timing/analysis telemetry so post-shot review can distinguish "only N moves were needed" from "N of M possible moves were emitted under pressure."
+
+The message is **fixed-width** and **homogeneous**. The QUA input stream is declared once with type `int` and size `BATCH_WORDS`; it is never resized. `n_moves` is carried inside the payload (not on a separate IO variable) — this resolves the critique F-02 atomicity bug without relying on mixed binary parsing unsupported by client input streams. `loop_index` + `max_loops` let the PPU reject semantically invalid batches (for example loop 4 of a 3-loop shot), while `sequence_no` handles transport ordering. `N_MAX_MOVES = 1024` is a placeholder until Phase 0A derives the real bound from descriptor geometry + assignment policy, then proves the OPX/QOP compiler and runtime accept the resulting input-stream declaration and that the latency curve has no cliff at that size.
+
+### `N_MAX_MOVES` derivation gate
+
+`N_MAX_MOVES` is not chosen by taste. Before ADR-0002 is accepted, Phase 0A must publish a short derivation:
+
+```
+N_MAX_MOVES =
+  max_moves_per_rearrangement_loop(
+      descriptor.max_sites,
+      descriptor.target_geometry_shape,
+      assignment_policy,
+      allowed_parallel_move_groups,
+      collision_avoidance_policy,
+  )
+```
+
+The derivation must cover current ~100-atom operation and the projected 1000-atom geometry. It must state whether the bound is:
+
+- **Per loop**: one `RearrangementBatchV1` per rearrangement loop; preferred.
+- **Per shot**: multiple loop move sets packed together; rejected unless measurement proves it is required.
+
+If the derived current-operation bound and the projected 1000-atom bound differ, ADR-0002 freezes the current bound and records the scaling trigger for a future ADR. The hard maximum of three rearrangement loops does not multiply `N_MAX_MOVES` unless the contract intentionally packs multiple loops into one batch.
 
 QUA-side validation:
 
 ```python
 with program() as rearrange:
-    batch = declare_input_stream(t=fixed, name="rearr_batch", size=BATCH_BYTES_FLOATS)
+    batch = declare_input_stream(t=int, name="rearr_batch", size=BATCH_WORDS)
     advance_input_stream(batch)
     # parse header from batch
-    assign(version, batch[OFFSET_VERSION])
+    assign(version, batch[OFF_PROTOCOL_VERSION])
     with if_(version != PROTOCOL_VERSION):
         align(...)                  # bring everything to a known boundary
         play("safe_state", "aod_x"); play("safe_state", "aod_y")
         # mark run unsafe via output stream
         ...
-    # similarly for sequence_no, snapshot_hash32, deadline_ppu_ticks
+    # similarly for sequence_no, snapshot_hash64, descriptor_hash64, deadline_ppu_ticks
     # on valid: iterate n_moves, play each
 ```
 
@@ -109,10 +149,14 @@ def rearrangement_shot(target_geometry, descriptor, snapshot, deadline_tick):
                  sequence_no=next_seq(),
                  n_moves=len(moves),
                  deadline_ppu_ticks=deadline_tick,
-                 snapshot_hash32=snapshot.hash32(),
+                 snapshot_hash64=snapshot.hash64(),
+                 descriptor_hash64=descriptor.hash64(),
+                 loop_index=current_loop,
+                 max_loops=compiled_max_loops,
+                 ideal_moves=ideal_move_count,
                  moves=pad_to(moves, N_MAX_MOVES),
              )
-    job.insert_input_stream("rearr_batch", batch)        # ~ms; Phase 0A measures
+    job.push_to_input_stream("rearr_batch", batch)       # fixed-width int list; Phase 0A measures
 ```
 
 The contract that survives 5+ years: **the fields and the wire layout above**. Everything else (classifier model, assignment algorithm, CUDA kernel internals, even N_MAX_MOVES if it grows) is rebuildable.
@@ -138,7 +182,7 @@ GPU buffer ownership (critique F-09 unresolved → Phase 0A deliverable):
 
 ## Canonical timing spans (single source of truth)
 
-All latency budgets in this plan (00, 05, 07) are stated against these named spans for **one rearrangement loop**. A shot runs ≤ 2 loops.
+All latency budgets in this plan (00, 05, 07) are stated against these named spans for **one rearrangement loop**. A shot runs nominally 2 loops, with a hard maximum of 3.
 
 ```
  camera                      occupation                       AOD                chirp
@@ -155,13 +199,13 @@ All latency budgets in this plan (00, 05, 07) are stated against these named spa
 | `t_expose` | atoms exposed onto EMCCD | fixed | ~10 ms |
 | `t_readout` | row-by-row sensor readout; occupation-matrix generation pipelined inside | deterministic | ~7 ms (35 µs/row × 200) |
 | `t_compute` | move computation (assignment) from the occupation matrix | best-effort, non-RT | sub-ms |
-| `t_insert` | encode + `insert_input_stream` transit to PPU FIFO | best-effort | Phase 0A measures |
+| `t_insert` | encode + `push_to_input_stream` transit to PPU FIFO | best-effort | Phase 0A measures |
 | `t_execute` | AOD waveform playback (chirp) | deterministic (PPU) | physics-limited |
 
 **Budget reconciliation:**
 - **Doc 00 / CONTEXT "≤ 5 ms compute+execute slot"** = `t_compute + t_insert + t_execute`, measured from **occupation-ready**. The pseudo-RT fixed wait-slot.
 - **Doc 07 acceptance #1 "frame-trigger → AOD-start, p99 ≤ 8 ms"** = `t_readout + t_compute + t_insert`, measured from **camera trigger** (≈ 7 ms readout + ~1 ms compute+insert). Excludes `t_expose` and `t_execute`.
-- **Per-loop wall-clock** ≈ `t_expose + t_readout + t_compute + t_insert + t_execute` ≈ 22 ms; ≤ 2 loops/shot ≈ 44 ms; well inside the ~2 s atom lifetime.
+- **Per-loop wall-clock** ≈ `t_expose + t_readout + t_compute + t_insert + t_execute` ≈ 22 ms; this is tracked for shot-duration budgeting. The shot-level policy is nominally 2 loops, with a hard maximum of 3; atom-lifetime headroom is margin, not the source of the cap.
 
 The two budgets bundle *different* physical legs (00 bundles `t_execute`; 07 bundles `t_readout`); both share `t_compute + t_insert`. Neither is wrong — always state which span a measurement targets.
 
@@ -174,7 +218,7 @@ The two budgets bundle *different* physical legs (00 bundles `t_execute`; 07 bun
 | CUDA classifier kernel | 0.1 ms | 0.5 ms | overprovisioned for 256×256 |
 | CUDA assignment kernel | 0.1 ms | 0.5 ms | ~100 atoms |
 | GPU → pinned host → Python | 0.05 ms | 0.2 ms | `cudaMemcpyAsync`, pinned memory |
-| `insert_input_stream` to PPU FIFO | **0.5 ms** | **5 ms (unknown)** | **Phase 0A measures** |
+| `push_to_input_stream` to PPU FIFO | **0.5 ms** | **5 ms (unknown)** | **Phase 0A measures** |
 | `advance_input_stream` + AOD setup | 0.05 ms | 0.1 ms | PPU clock-cycle scale |
 | AOD chirp (physics-limited) | 1 ms | 5 ms | not architectural |
 | **Total** | **≈ 2–4 ms** | **≈ 7–10 ms** | dominated by stage 6 + chirp |
@@ -186,7 +230,9 @@ Phase 0A measurement (acceptance items below) replaces every estimate with a mea
 The rearrangement loop contract is **provisional** until these pass:
 
 1. **End-to-end loop latency on the Tower-resident broker**: median, p95, p99, p99.9, max from PPU `get_timestamp()` across ≥ 10⁵ frame-trigger-to-AOD-start cycles. Pass threshold: p99 ≤ 8 ms at current array size; max ≤ 15 ms.
-2. **`insert_input_stream` payload-size scaling**: latency curves for 16 B, 256 B, 1 KB, 8 KB, BATCH_BYTES. Pass: curve is flat (within 1 ms) up to BATCH_BYTES.
+2. **`push_to_input_stream` payload-size scaling**: latency curves for separate homogeneous `int` vector declarations of `{4, 64, 256, 2048, BATCH_WORDS}` words, corresponding to `{16 B, 256 B, 1 KB, 8 KB, target}` byte-equivalents for 32-bit words. Pass: curve is flat (within 1 ms) up to BATCH_WORDS.
+   - **Compiler/runtime capacity check:** before latency measurement, compile and run the `BATCH_WORDS` declaration on the actual OPX/QOP stack. If 6157 words is rejected or shows a latency cliff, either shrink `N_MAX_MOVES` or move to multi-batch before ADR-0002 is accepted.
+   - **Move-bound derivation:** before choosing target `BATCH_WORDS`, derive `N_MAX_MOVES` from descriptor geometry and assignment/collision policy for current and projected geometries. The measured target must be the derived bound, not the placeholder value if they differ.
 3. **30-minute no-drop acquisition**: zero `Statistic_Failed_Buffer_Count` (or vendor equivalent) under realistic competing CPU/IO load on the Tower.
 4. **Fault injection**: kill broker mid-loop, drop input-stream payload, send malformed BATCH — PPU enters safe state in every case; no analog out beyond bounds; recovery requires operator `Disarm`/`Arm` cycle.
 5. **Process discipline measurement**: p99/p99.9 with broker at `HIGH_PRIORITY_CLASS` vs `REALTIME_PRIORITY_CLASS` vs default. Accept only the setting that improves p99.9 without dropped frames or system instability.
@@ -196,8 +242,8 @@ The rearrangement loop contract is **provisional** until these pass:
 
 Three knobs available on existing hardware:
 
-1. **Larger BATCH_BYTES**: raise N_MAX_MOVES; the wire layout is forward-compatible if the PPU rejects unknown versions and the producer never under-pads.
-2. **Multi-batch per shot**: send N batches in one `insert_input_stream`; QUA reads N times. Same wire-transit cost, lower Python overhead.
+1. **Adjust BATCH_WORDS**: shrink or raise N_MAX_MOVES based on OPX/QOP capacity and latency measurement; the wire layout is forward-compatible if the PPU rejects unknown versions and the producer never under-pads.
+2. **Multi-batch per shot**: send N batches via `push_to_input_stream`; QUA reads N times. Same wire-transit cost, lower Python overhead.
 3. **Compress trajectory**: RLE on contiguous moves; PPU decompresses inside the QUA program if simple.
 
 Hard limit: the GPU compute headroom. RTX 4000 Ada is overprovisioned for 256×256 ROIs; ROI growth to 1000-atom geometry is benchmarked in Phase 5.
@@ -206,7 +252,7 @@ If the Phase-3 budget is exceeded and none of the knobs close the gap, the escap
 
 ## Anti-patterns avoided
 
-- **A3** (Python in the timed loop) — no Python code runs after `insert_input_stream`. The chirp is QUA on PPU.
+- **A3** (Python in the timed loop) — no Python code runs after `push_to_input_stream`. The chirp is QUA on PPU.
 - **A7** (same process owns RT-IO + GUI + analysis) — broker is GUI-less; analysis lives in the compute service.
 - **A10** (bypassing the sequencer for "quick fixes") — every analog/digital action is QUA-compiled. There is no `qm_machine.set_analog_voltage(...)` path during armed runs.
 - **A14** (schemas defined by example) — BATCH layout is `struct`-typed and versioned.

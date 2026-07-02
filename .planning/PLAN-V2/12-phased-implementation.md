@@ -20,7 +20,7 @@ Total: ~12–18 months for v1; v2 features (REMOTE-01, UI-02, DATA-01, DEV-01) f
 
 **Workstreams (parallel):**
 
-1. **W0A-1: `insert_input_stream` latency measurement.** Write a minimal QUA program that loops `advance_input_stream → get_timestamp → output_stream`. Python side feeds payloads of {16 B, 256 B, 1 KB, 8 KB, target BATCH_BYTES}. Collect ≥ 10⁵ samples per size. Report p50/p95/p99/p99.9/max. Report this as the `t_insert` span (§07 canonical spans) so it composes with W0A-2's `t_compute` and the measured `t_readout`/`t_execute` into the §00 ≤ 5 ms compute+execute budget.
+1. **W0A-1: `push_to_input_stream` latency measurement.** First derive `N_MAX_MOVES` from descriptor geometry + assignment/collision policy for current ~100-atom operation and projected 1000-atom operation; treat the current-operation bound as the Phase 0A target unless the 1000-atom target is explicitly in scope. Then write minimal QUA test programs that loop `advance_input_stream → get_timestamp → output_stream`, one declared input-stream vector size per test. Python side feeds homogeneous `int` vectors of `{4, 64, 256, 2048, BATCH_WORDS}` words, corresponding to `{16 B, 256 B, 1 KB, 8 KB, target}` byte-equivalents for 32-bit words. Collect ≥ 10⁵ samples per size. Report p50/p95/p99/p99.9/max. Report this as the `t_insert` span (§07 canonical spans) so it composes with W0A-2's `t_compute` and the measured `t_readout`/`t_execute` into the §00 ≤ 5 ms compute+execute budget.
 2. **W0A-2: GPUDirect for Video bring-up + CPU baseline.** Confirm BitFlow Axion 1xB + RTX 4000 Ada GPUDirect path works in a single in-process Python broker. Measure each canonical span (§07): DMA-to-VRAM, `t_compute` (classifier + assignment), encoder, host pickup. **Also measure a CPU-only `t_compute` baseline** (BitFlow → CPU RAM, SIMD threshold + greedy/auction assignment) at current array size and projected 1000-atom ROI. GPU stays the committed path (ADR-0002 / §07); the CPU baseline quantifies the GPU's margin and provides a fallback datapoint. Document Andor SDK ↔ BitFlow handoff (critique F-09).
 3. **W0A-3: Process-discipline study.** Compare broker priorities (`NORMAL`, `HIGH`, `REALTIME`) and CPU pinning configurations against p99/p99.9 latency and dropped frames. Pick the lowest-priority config that meets the latency target without instability.
 4. **W0A-4: Safety-plane independence test.** Wire a temporary hardware E-stop into shutter + RF amp enable lines. Verify that pressing it brings shutters closed and RF off within sub-ms, with no software in the path. Confirm that killing the broker also brings PPU into safe state within one shot via the QUA watchdog.
@@ -28,7 +28,7 @@ Total: ~12–18 months for v1; v2 features (REMOTE-01, UI-02, DATA-01, DEV-01) f
 
 **Exit gates (must all pass to enter Phase 1):**
 
-- W0A-1: `t_insert` (p99) is small enough that the **composed** budget holds — `t_compute + t_insert + t_execute` p99 ≤ 5 ms from occupation-ready (§00, §07 spans), with `t_execute` (AOD chirp) and `t_compute` from W0A-2 folded in. A bare `insert_input_stream` p99 ≤ 5 ms is **not** sufficient on its own (insert is one span of the budget, not the whole). If the composed budget fails, a concrete escape (multi-batch / RLE / tighter chirp) is documented.
+- W0A-1: `N_MAX_MOVES` is derived from descriptor geometry + assignment/collision policy rather than chosen as a magic constant; OPX/QOP compiler and runtime accept the resulting target `BATCH_WORDS` declaration (`6157` words / ~24.6 KB if provisional `N_MAX_MOVES=1024` survives derivation), and `t_insert` (p99) is small enough that the **composed** budget holds — `t_compute + t_insert + t_execute` p99 ≤ 5 ms from occupation-ready (§00, §07 spans), with `t_execute` (AOD chirp) and `t_compute` from W0A-2 folded in. A bare `push_to_input_stream` p99 ≤ 5 ms is **not** sufficient on its own (insert is one span of the budget, not the whole). If target `BATCH_WORDS` is rejected or the composed budget fails, a concrete escape (shrink `N_MAX_MOVES` / multi-batch / RLE / tighter chirp) is documented before ADR-0002 is accepted.
 - W0A-2: 30-minute no-drop acquisition under realistic load; documented SDK ownership model.
 - W0A-3: chosen priority/affinity setting produces measurable p99.9 improvement over default.
 - W0A-4: independent safe-state reached in every fault-injection scenario in §09.
@@ -50,19 +50,20 @@ Maps to `REQUIREMENTS.md`: PLAT-01, PLAT-02, PLAT-03, RUN-01, RUN-02, RUN-03, SA
 **Workstreams:**
 
 1. **W1-1: Proto3 contracts.** Define `lifecycle.proto`, `run_model.proto`, `safety.proto`, `scheduler.proto`. Wire schema review with the team. No code generation until reviewed.
-2. **W1-2: Orchestrator skeleton.** Long-running Python process on the **Tower** (run-execution authority, ADR-0001; in v1 everything is co-located on the Tower). Implements gRPC server for `Submit`, `Cancel`, `Status`, `ListRuns`. State FSM held Tower-local-authoritative and mirrored to Postgres. Heartbeat consumer. The EliteDesk Job Validator/Submitter is a thin admission gateway in front of `Submit`.
-3. **W1-3: Postgres schema v1.** Tables: `device_descriptors`, `descriptor_activations`, `runs`, `shots`, `raw_manifests`. Alembic migrations. (Descriptors are immutable; currency is the `descriptor_activations` append-only pointer — ADR-0003, no `valid_until`.)
+2. **W1-2: Orchestrator skeleton.** Long-running Python process on the **Tower** (run-execution authority, ADR-0001; `v1-dev` may co-locate roles on the Tower). Implements gRPC server for `DequeueForExecution`, active-run `Cancel`, `Status`, `ListRuns`. State FSM held Tower-local-authoritative and mirrored to Postgres. Heartbeat consumer. The EliteDesk Admission Validator/Submitter owns `Enqueue`, pending-job `Cancel`, and the pending job queue.
+3. **W1-3: Postgres schema v1.** Tables: `device_descriptors`, `descriptor_activations`, `accepted_jobs`, `runs`, `shots`, `raw_manifests`. Alembic migrations. (Descriptors are immutable; currency is the `descriptor_activations` append-only pointer — ADR-0003, no `valid_until`.)
 4. **W1-4: Lifecycle contract base.** `src/device_servers/_base/` provides a `LifecycleService` abstract class + FSM + heartbeat. Contract test suite in `tests/contract/`.
 5. **W1-5: One fake device service.** `device_servers/fake_camera/` implements the contract; passes contract tests.
 6. **W1-6: Broker shell.** Tower process that connects to OPX via QM SDK and exposes a `Broker` gRPC service to the scheduler. No rearrangement logic yet — just `Configure / Arm / Start / Stop / Disarm`.
-7. **W1-7: Operator CLI.** Minimal `lab` CLI with `submit-run`, `status`, `cancel`, `list-runs`.
+7. **W1-7: Operator CLI.** Minimal `lab` CLI with `submit-run`, `status`, `cancel-job`, `cancel-run`, `list-runs`.
 
 **Exit gate:**
-1. Orchestrator starts on the Tower (v1 co-located); exposes gRPC. EliteDesk admission gateway forwards a `Submit`.
+1. Orchestrator starts on the Tower (`v1-dev` may be co-located); exposes gRPC. EliteDesk admission gateway enqueues an `AcceptedJob`.
 2. Fake camera service registers, returns typed `Capabilities` + `Health`.
-3. `Submit(RunRequest)` validates into a `RunPlan` and persists.
+3. `Enqueue(RunRequest)` persists an `AcceptedJob`; Tower dequeue compile-validates it into a `RunPlan`.
 4. State machine transitions visible via `Status` stream.
-5. Heartbeat miss surfaces a typed error within 5 s.
+5. Pending-job cancel records request/effective timestamps on `accepted_jobs`; active-run cancel records request/effective timestamps on `runs`.
+6. Heartbeat miss surfaces a typed error within 5 s.
 
 ## Phase 2 — Fake Execution Slice
 
@@ -98,7 +99,7 @@ Maps to `REQUIREMENTS.md`: SAFE-02, CFG-01.
 **Exit gate:**
 1. A run pinned to snapshot S survives concurrent publication of snapshot S+1.
 2. Every shot row has a non-null `(snapshot_id, descriptor_id, bundle_id)`.
-3. Killing the broker mid-shot results in `shots.state IN ('raw_spooled', 'committed', 'unsafe')` — never an orphaned DB row or orphaned raw file.
+3. Killing the broker mid-shot results in `shots.state IN ('raw_spooled', 'commit_pending', 'committed', 'unsafe')` — never an orphaned DB row or orphaned raw file.
 4. Restore from off-host replica into a fresh EliteDesk produces an identical Postgres state, with bounded data loss matching RPO.
 
 ## Phase 4 — Modeled Device Foundation
@@ -127,12 +128,12 @@ Maps to `REQUIREMENTS.md`: HW-01.
 2. **W5-2: Real-device adapter.** `src/device_servers/camera_andor/` implements the lifecycle contract against the Andor SDK.
 3. **W5-3: Hardware smoke tests.** `tests/hardware/test_andor.py` (manual run); confirms triggered acquisition, trigger response time, frame integrity.
 4. **W5-4: Rearrangement loop on real hardware.** Phase 0A's measurement spike code becomes a regression test on the actual loop. Latency budget enforced as a CI gate (against a recorded baseline).
-5. **W5-5: First scientifically meaningful demo.** A run that loads atoms, images them, rearranges them, and produces a defect-free target geometry — running through the full PLAN-V2 stack.
+5. **W5-5: First commissioning demo.** A run that loads atoms, images them, rearranges them, and produces a defect-free target geometry — running through the full PLAN-V2 stack while still Tower-local. This is explicitly a `v1-dev` commissioning run with accepted Tower-disk durability risk, not routine scientific operation. Its outputs are commissioning data, not durable scientific data, and must not support durable analysis or publication claims.
 
 **Exit gate:**
 1. Andor service registers, advertises typed `CameraCapabilities`, passes contract tests.
 2. The Phase 0A latency baseline holds on the integrated platform.
-3. One full demo run from operator CLI submit → atoms rearranged → `RunSummary` persisted, with all provenance IDs populated.
+3. One full commissioning demo run from operator CLI submit → atoms rearranged → `RunSummary` persisted, with all provenance IDs populated and `durability_tier = 'v1-dev_non_durable'` on runs/shots and visible in the dashboard/export path. Raw commissioning data loss is acceptable under Tower-disk failure in this phase; inconsistent metadata is not.
 
 ## Phase 6 — First Remote Hardware Adapter
 
@@ -142,7 +143,7 @@ Maps to `REQUIREMENTS.md`: HW-02.
 
 1. **W6-1: Choice of first remote device.** Recommended: SLM on Mini (`PC2`) — exercises the cross-host orchestration path most fully.
 2. **W6-2: Remote-device adapter.** `src/device_servers/slm/` runs on Mini; exposes the same lifecycle contract over gRPC.
-3. **W6-3: Cross-host smoke tests.** Validate that the Tower orchestrator drives the SLM service on Mini through the same code path as a local fake. (Phase 6 is also where the EliteDesk Validator + Postgres are first physically split off the Tower, per ADR-0001 — cross-host orchestration and the store-distribution step are validated together.)
+3. **W6-3: Cross-host smoke tests.** Validate that the Tower orchestrator drives the SLM service on Mini through the same code path as a local fake. (Phase 6 is also where the EliteDesk Validator + Postgres are first physically split off the Tower, per ADR-0001 — cross-host orchestration and the store-distribution step are validated together. This transition upgrades from commissioning-only `v1-dev` to routine `v1-lab` operation.)
 4. **W6-4: SLM-integrated demo.** A run that uses an SLM-defined initial geometry alongside the rearrangement loop.
 
 **Exit gate:**

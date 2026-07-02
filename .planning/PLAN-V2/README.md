@@ -10,7 +10,7 @@ Concrete architecture and implementation plan for a neutral-atom optical-tweezer
 
 This plan fuses two prior bodies of work:
 
-1. The **software-platform spec** in `.planning/PROJECT.md`, `REQUIREMENTS.md`, `ROADMAP.md` (orchestrator on `PC1`, typed `RunRequest -> RunPlan -> ShotResult -> RunSummary`, lifecycle contract, fake-first testing).
+1. The **software-platform spec** in `.planning/PROJECT.md`, `REQUIREMENTS.md`, `ROADMAP.md` (orchestrator on `PC1`, typed `RunRequest -> AcceptedJob -> RunPlan -> ShotResult -> RunSummary`, lifecycle contract, fake-first testing).
 2. The **physical control-system research** in `.planning/research-inputs/Physical control system design/` (`amo-control-system-design.md` + `critique-and-improvements-1.md`), which adds hardware grounding: OPX+ PPU, BitFlow + GPUDirect rearrangement loop, calibration DAG, network topology, durable provenance, safety plane.
 
 Where the two disagree, this plan resolves the disagreement and records the decision in §13 (ADRs).
@@ -36,7 +36,7 @@ Where the two disagree, this plan resolves the disagreement and records the deci
 
 ## Top-level summary
 
-- **Orchestrator + run-execution authority on `PC1` (HP Z2 Tower)** — co-located with the `OPX+` broker, BitFlow Axion 1xB framegrabber, Andor iXon, and RTX 4000 Ada to keep the rearrangement loop in one PCIe topology. Only the Tower advances run state. The EliteDesk is a Job Validator/Submitter and durable store (Postgres metadata + calibration registry + raw replica), not an authority. Trade-off: latency-first; A8 risk bounded by keeping durable history off the Tower. v1 co-locates all roles on the Tower; physical distribution is a later step. See ADR-0001.
+- **Orchestrator + run-execution authority on `PC1` (HP Z2 Tower)** — co-located with the `OPX+` broker, BitFlow Axion 1xB framegrabber, Andor iXon, and RTX 4000 Ada to keep the rearrangement loop in one PCIe topology. Only the Tower advances run state. The EliteDesk is an Admission Validator/Submitter, pending job queue owner, and durable store (Postgres metadata + calibration registry + raw replica), not run authority. Trade-off: latency-first; A8 risk bounded by keeping durable history off the Tower. `v1-dev` may co-locate all roles on the Tower for bring-up/testing; `v1-lab` moves Admission Validator + Postgres + replica to the EliteDesk before routine scientific operation. See ADR-0001.
 - **Six layered seams** (Physics → RT → device-server → calibration/metadata → compiler → scheduler → UI). Layer boundaries are the durable contracts; implementations inside layers are rebuildable.
 - **Two communication planes.** Control plane carries typed lifecycle + run messages between orchestrator and services. Data plane keeps bulk payloads (raw images, SLM patterns) local to the host that owns them.
 - **OPX+ owns deterministic timing.** Python is never in the timed loop. Rearrangement closes on the PPU with a versioned `RearrangementBatchV1` input-stream message; GPU computes the plan, PPU plays the waveform.

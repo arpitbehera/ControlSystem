@@ -44,7 +44,7 @@ The lab runs a neutral-atom optical-tweezer experiment. The control system must:
 
 | Constraint | Source | Implication |
 |---|---|---|
-| `PC1` is the run-execution authority in v1 | `PROJECT.md`, ADR-0001 | Run ownership + orchestrator (scheduler, FSM, DAG runner) + broker stay on the Tower; only the Tower can advance run state. EliteDesk is a Job Validator/Submitter + durable store, not an authority. In v1 all roles co-locate on the Tower; distribution is later |
+| `PC1` is the run-execution authority in v1 | `PROJECT.md`, ADR-0001 | Run ownership + orchestrator (scheduler, FSM, DAG runner) + broker stay on the Tower; only the Tower can advance run state. EliteDesk is an Admission Validator/Submitter + pending job queue + durable store, not run authority. `v1-dev` may co-locate all roles on the Tower for bring-up/testing; `v1-lab` moves Admission Validator + Postgres + replica to the EliteDesk before routine scientific operation |
 | Windows-first runtime | `PROJECT.md` | Orchestration, testing, packaging on Windows; no Linux-only stack |
 | Python is never in the hard-timing loop | `PROJECT.md`, OPX architecture | All timed analog/digital lives on the OPX PPU; Python is the builder / planner / consumer |
 | Bulk payloads stay off the control path | `PROJECT.md` | Camera frames + SLM patterns local to the host that owns them; orchestrator handles metadata and derived outputs only |
@@ -54,7 +54,7 @@ The lab runs a neutral-atom optical-tweezer experiment. The control system must:
 | No PTP on installed switch + router | `amo-control-system-design.md` §3.4.1.1 | NTP-only between hosts; OPX owns experimental timing internally |
 | BitFlow Axion 1xB + RTX 4000 Ada are PCIe-bound to the Tower | GPUDirect for Video requires same PCIe topology | Rearrangement compute cannot relocate off the Tower |
 | QM router required between OPX+ and lab subnet | QM vendor docs | Cannot bypass without QM support; treat QM router VLAN as trust enclave |
-| `insert_input_stream` latency vs payload size is unknown | QM docs publish no number | Phase 0A spike must measure before contracts are frozen (critique F-08) |
+| QUA input-stream push latency vs payload size is unknown | QM docs publish no number | Phase 0A spike must measure before contracts are frozen (critique F-08) |
 | SLM HDMI refresh ≥ 16.7 ms | `PC2` HDMI link | Hard floor on any experiment that updates the hologram between shots |
 | QUAlibrate source moved private | github.com/qua-platform/qualibrate | Build to the DAG-shape *contract*, not to the QUAlibrate library |
 
@@ -85,4 +85,4 @@ Per the critique register (`critique-and-improvements-1.md` §I-15, §F-13, §F-
 - Run model types: `RunRequest`, `RunPlan`, `ShotResult`, `RunSummary`.
 - Rearrangement-loop wire message: `RearrangementBatchV1` (fixed-width, versioned, padded). Detailed in §07.
 - Role × verb access matrix (verbs may be added, never silently changed).
-- **Rearrangement-loop latency budget:** `t_compute + t_insert + t_execute ≤ 5 ms` measured from occupation-ready (the pseudo-RT fixed wait-slot), against the canonical timing spans in §07. Atom in-trap lifetime ≈ 2 s; a shot runs ≤ 2 rearrangement loops; per-loop wall-clock ≈ 22 ms (incl. ~10 ms exposure + ~7 ms readout). On compute overrun the loop plays a best-effort partial and retries on the next loop. Phase 0A measures every span before this is hard-frozen.
+- **Rearrangement-loop latency budget:** `t_compute + t_insert + t_execute ≤ 5 ms` measured from occupation-ready (the pseudo-RT fixed wait-slot), against the canonical timing spans in §07. A shot runs nominally 2 rearrangement loops, with a hard maximum of 3; atom-lifetime headroom is margin, not the source of the cap. Per-loop wall-clock ≈ 22 ms (incl. ~10 ms exposure + ~7 ms readout). If compute produces a valid batch before deadline with fewer moves than ideal, the loop plays that best-effort partial and retries remaining atoms on the next loop; missing/late/invalid batches enter safe state instead. Phase 0A measures every span before this is hard-frozen.

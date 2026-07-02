@@ -52,7 +52,7 @@ class RtJobResult:
     safety_state_on_exit: SafetyState
 ```
 
-The `validation_token` is the gate. The compiler at L4 attaches it only after the run passes descriptor validation, parameter bounds, and rate limits. The broker refuses any `RtJobSubmission` whose `validation_token` is missing or expired. The token is a *compile-time attestation that validation ran* — it is **not** the safety mechanism. Real safety is the independent hardware safety plane in §09, which can inhibit RF/AOD/shutters regardless of any token.
+The `validation_token` is the gate. The compiler at L4 attaches it only after the run passes descriptor validation, parameter bounds, and rate limits against the pinned descriptor + snapshot. The broker refuses any `RtJobSubmission` whose `validation_token` is missing, expired, has a bad signature, or does not match the submission's pinned IDs. The broker does **not** compare pinned IDs to current active pointers; Tower compile-validation owns that policy decision. The token is a *compile-time attestation that validation ran* — it is **not** the safety mechanism. Real safety is the independent hardware safety plane in §09, which can inhibit RF/AOD/shutters regardless of any token.
 
 In-shot rearrangement messages are a special case of this seam — see §07 for the `RearrangementBatchV1` wire format.
 
@@ -78,7 +78,7 @@ Crossings:
   1. Broker writes raw payload + manifest + checksum to local durable spool. `fsync`.
   2. Broker pushes shot record (with manifest hash) to scheduler via gRPC.
   3. Scheduler writes shots row inside a transaction that also inserts the raw-manifest pointer.
-  4. Data-lake writer drains the spool to the data lake; updates `shots.raw_state` from `pending` → `lake` once the off-host replica acknowledges.
+  4. Data-lake writer drains the spool to the data lake; updates `shots.raw_state` from `raw_spooled` → `metadata_mirrored` → `replicated` as the DB mirror and off-host replica complete.
   5. Replica-acknowledged shots become eligible for spool eviction; un-acknowledged shots are retained.
 - **Calibration publication** (the transactional path per critique F-04):
   1. Calibration node runs → produces candidate `calibration_execution` row.
@@ -91,7 +91,7 @@ Out of scope:
 
 ## L3 ↔ L4 — Persistence ↔ Compiler
 
-L4 reads the *current* snapshot and the *current* descriptor; it produces a compiled artifact. L3 records the artifact and the IDs it consumed.
+L4 reads the descriptor and snapshot pinned on the `AcceptedJob`; it produces a compiled artifact. L3 records the artifact and the IDs it consumed. "Current" activation pointers are resolved by the EliteDesk during admission, not by L4 at execution time.
 
 ```python
 class DeviceDescriptor:
@@ -140,7 +140,15 @@ class RunRequest:
     template_name: str                 # e.g. "rydberg_blockade_demo"
     parameters: Mapping[str, JSON]     # scanned + fixed
     required_calibration: list[str] | None
+    requested_descriptor_id: int | None # replay/debug/admin only; default resolves active descriptor
     idempotency_key: str               # operator-provided, dedup'd by scheduler
+
+class AcceptedJob:
+    job_uuid: UUID
+    request: RunRequest
+    descriptor_id: int                  # pinned at admission
+    snapshot_id: int                   # pinned at admission
+    submitted_at: datetime
 
 class DagNode:
     name: str
@@ -158,7 +166,7 @@ class DagTraversal:
 
 Out of scope at this boundary:
 - The scheduler does not know how to compile QUA. It asks L4.
-- The compiler does not know what calibration is *fresh*. It receives a `snapshot_id` from L5.
+- The compiler does not decide calibration freshness. Admission and the Tower scheduler check freshness before L4 compiles; L4 receives a `snapshot_id` from L5.
 
 ## L5 ↔ L6 — Scheduler ↔ UI / Users
 

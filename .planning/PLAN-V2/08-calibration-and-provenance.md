@@ -38,7 +38,7 @@ In `dag_nodes`, `calibration_executions`, `parameter_versions`, `calibration_sna
 
 | Trigger | Source |
 |---|---|
-| **Pull (freshness)** | `RunRequest.required_calibration` lists params; scheduler chains the DAG when `max_age_s` is exceeded |
+| **Pull (freshness)** | `RunRequest.required_calibration` lists params; admission blocks enqueue and chains the DAG when `max_age_s` is exceeded at `submitted_at`; Tower blocks execution and chains the DAG if the pinned snapshot becomes stale before `execution_started_at` |
 | **Push (fitness failure)** | `fitness_check == "fail"` — invalidates that node's candidate; downstream candidates are marked stale (critique F-16) |
 | **Scheduled (drift)** | A cron-shape rule re-runs node X every Y hours |
 | **Manual** | `senior_operator` runs a node explicitly |
@@ -83,9 +83,9 @@ COMMIT;
 Properties:
 
 - A snapshot is **append-only**: the row, once committed, is never updated. `parent_id` is inheritance lineage, not currency.
-- A run resolves its `snapshot_id` at submit time, atomically, by reading the **latest `snapshot_activations` row for its lineage** and pinning that `snapshot_id`.
+- The EliteDesk resolves an accepted job's `snapshot_id` at admission time, atomically, by reading the **latest `snapshot_activations` row for its lineage** and pinning that `snapshot_id`.
 - Concurrent publications are safe: each appends its own snapshot + activation; the latest activation wins deterministically. There is no ambiguous "two heads" state (the old parent-chain head model could produce two children of one parent — the activation log cannot).
-- A wrong calibration cannot retroactively poison existing data: every shot points at the snapshot that was *active* at its arm time, by ID. A bad publication is corrected by activating a known-good snapshot (a new activation row), never by mutating history.
+- A wrong calibration cannot retroactively poison existing data: every shot points at the snapshot pinned by its accepted job, by ID. A bad publication is corrected by activating a known-good snapshot (a new activation row), never by mutating history.
 
 ### Snapshot vs registry semantics
 
@@ -147,7 +147,7 @@ calibration_snapshot_id ──┐
                        shot_uuid
                           ├─→ shot.timing (PPU ticks)
                           ├─→ shot.analysis (control-relevant)
-                          ├─→ shot.raw_state ∈ {pending, lake, lost}
+                          ├─→ shot.raw_state ∈ {raw_spooled, metadata_mirrored, replicated, lost}
                           ├─→ raw_manifests.sha256 + path
                           └─→ HDF5 attrs (same IDs as DB row)
 ```
@@ -155,6 +155,8 @@ calibration_snapshot_id ──┐
 Properties:
 
 - **No timestamp comparisons across hosts** for causality. Snapshot identity is resolved by ID, not by `published_at <= shot.started_at`.
+- **Queued jobs pin descriptor + snapshot at admission.** The EliteDesk records the active `descriptor_id` and `snapshot_id` in `AcceptedJob` at `submitted_at`; the Tower re-validates those pinned IDs at `execution_started_at` and never silently rebinds a queued job to newer active pointers. Explicit descriptor IDs are reserved for replay/debug/admin flows.
+- **Freshness is checked twice.** Admission checks `required_calibration` freshness before enqueue. Tower checks it again at execution start. If the pinned snapshot is stale at execution time, the job becomes `blocked_calibration`; the DAG runs, but the queued job is not silently rebound. The user/operator must resubmit or explicitly refresh-and-rebind to the new snapshot.
 - **No path inferred from data**. The HDF5 file is found via `raw_manifests.file_path`; if missing on the lake, the off-host replica is queried; if both missing, `raw_state = 'lost'` makes this explicit.
 - **No silent overwriting**. Every level of the chain is append-only.
 
@@ -163,13 +165,13 @@ Properties:
 | Scenario | Safety property |
 |---|---|
 | Two operators submit conflicting runs | Idempotency by `(user, idempotency_key)`; serial queue prevents reorderings |
-| Senior operator publishes new snapshot mid-run | In-flight run keeps its pinned `snapshot_id`; a new run reads the latest activation |
-| Admin publishes + activates a new `device_descriptor` mid-run | In-flight run keeps its pinned `descriptor_id`; a new run reads the latest descriptor activation (no in-place patch) |
+| Senior operator publishes new snapshot mid-run | In-flight run keeps its pinned `snapshot_id`; newly accepted jobs read the latest activation |
+| Admin publishes + activates a new `device_descriptor` mid-run | In-flight run keeps its pinned `descriptor_id`; newly accepted jobs read the latest descriptor activation (no in-place patch) |
 | Analyst tries to mutate calibration | Postgres role lacks `INSERT` privilege; ACL also rejects at gRPC layer |
 | Automated agent submits a non-allow-listed template | Compiler refuses; never enters queue |
 
 ## What this enables
 
 - **5-year audit**: pick any historical shot row, walk back through `run_uuid` → `(snapshot, descriptor, bundle)` → reconstruct the exact compiled code, the exact parameter values, the exact driver versions, and the exact source-tree state at compile time.
-- **Reproducibility under personnel turnover**: a new operator submitting the *same* `RunRequest` against the *same* snapshot produces the *same* compiled bytes; bit-for-bit comparison is possible (modulo OPX server build).
+- **Reproducibility under personnel turnover**: a new operator submitting the *same* `RunRequest` against the *same* descriptor + snapshot produces the *same* compiled bytes; bit-for-bit comparison is possible (modulo OPX server build).
 - **Conway-resistant separation**: nobody has to remember "which calibration is current"; the DB knows. The lab spreadsheet (anti-pattern A17) never gets created.

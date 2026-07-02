@@ -12,7 +12,7 @@ The control plane is the orchestrator-to-service backbone. It carries small type
 | Authentication | mTLS with per-service cert issued by an internal CA on the EliteDesk | Lab-scoped; CA cert distributed manually on Phase 1 deployment |
 | Heartbeats | Server-side bidi stream; default 1 Hz; 3-miss timeout | Detects partitions even when TCP RST is delayed |
 
-gRPC is **not** the transport for the rearrangement input-stream. That uses the QM `insert_input_stream` channel directly between broker process and OPX server, on VLAN 50. The gRPC control plane never crosses VLAN 50.
+gRPC is **not** the transport for the rearrangement input-stream. That uses the QM QUA input-stream push API (`push_to_input_stream` in current SDKs; older notes may call this insert/push) directly between broker process and OPX server, on VLAN 50. The gRPC control plane never crosses VLAN 50.
 
 ## Lifecycle contract
 
@@ -101,20 +101,35 @@ class RunRequest:
     template_name: str
     parameters: Mapping[str, JSON]              # scanned and fixed
     required_calibration: list[str] | None      # registry params that must be fresh
+    requested_descriptor_id: int | None         # replay/debug/admin only; normal submissions resolve active descriptor
     idempotency_key: str
-    submitted_at: datetime
+
+@dataclass(frozen=True)
+class AcceptedJob:
+    job_uuid: UUID
+    request: RunRequest
+    descriptor_id: int                           # pinned at admission
+    snapshot_id: int
+    submitted_at: datetime                      # accepted into EliteDesk pending queue
+    cancel_requested_at: datetime | None = None
+    cancel_requested_by: str | None = None
+    cancel_effective_at: datetime | None = None
 
 @dataclass(frozen=True)
 class RunPlan:
     run_uuid: UUID
-    request: RunRequest
+    job: AcceptedJob
     snapshot_id: int
     descriptor_id: int
     execution_bundle_id: int
     compiled: CompiledRun
     shot_schedule: list[ShotSpec]               # per-shot parameter resolution
     estimated_duration_s: float
+    execution_started_at: datetime              # Tower begins executing dequeued job
     validation_token: ValidationToken
+    cancel_requested_at: datetime | None = None
+    cancel_requested_by: str | None = None
+    cancel_effective_at: datetime | None = None
 
 @dataclass(frozen=True)
 class ShotResult:
@@ -138,10 +153,25 @@ class RunSummary:
     snapshot_id: int
     descriptor_id: int
     execution_bundle_id: int
+    durability_tier: Literal["v1-dev_non_durable", "v1-lab_durable"]
     notes: list[str]
 ```
 
+Cancel target shape:
+
+```python
+@dataclass(frozen=True)
+class CancelRequest:
+    target: UUID                                # job_uuid or run_uuid
+    target_kind: Literal["job", "run"]
+    requested_by: str
+    requested_at: datetime
+    reason: str | None
+```
+
 `ShotResult` carries only the *control-relevant* analysis output — atom counts, fidelity estimates, conditional-branch readouts. Bulk images stay in the raw lake; the result references them via `raw_manifest`.
+
+`durability_tier` is a first-class run/shot property, not a milestone-note convention. Phase 5 Tower-local commissioning runs are labeled `v1-dev_non_durable`; routine `v1-lab` runs are labeled `v1-lab_durable`. Dashboards and exports must show the tier whenever displaying run or shot data.
 
 ## Run state machine
 
@@ -164,30 +194,41 @@ Per critique F-15, runs and shots both carry an explicit state machine. The **To
 Per-shot state machine (subset):
 
 ```
-prepared → armed → executing → raw_spooled → committed
-                    │             │
+prepared → armed → executing → raw_spooled → metadata_mirrored → replicated → committed
+                    │             │              │                 │
+                    │             │              │                 ├─→ raw_lost
+                    │             │              └─→ commit_pending
                     │             ├─→ failed
                     │             └─→ raw_lost
                     └─→ safety_trip → unsafe
 ```
 
-`raw_spooled` is the durable-commit waypoint — once the broker has fsync'd the raw payload + manifest locally, the shot is recoverable even if Postgres has not yet committed. `committed` requires the DB row insert to succeed *and* an off-host replica to acknowledge the manifest.
+`raw_spooled` is the Tower-local durable waypoint — once the broker has fsync'd the raw payload + manifest locally, the shot is recoverable on the Tower even if Postgres has not yet committed. `metadata_mirrored` means the Postgres shot row and raw manifest row exist. `replicated` means the off-host raw replica acknowledged the manifest. `committed` requires both metadata mirrored and off-host raw replication. During an EliteDesk/Postgres outage or replica lag, execution may complete while the shot remains `raw_spooled` or `commit_pending`; UI must show "execution complete, commit pending" rather than "committed."
+
+Cancel routing follows authority ownership:
+
+- `pending` job: EliteDesk marks `accepted_jobs.state = "cancelled"` and records `cancel_requested_at`, `cancel_requested_by`, `cancel_effective_at`.
+- `dequeued`, `validated`, `planned`, `armed`, or `executing`: Tower records the cancel request on the run and makes it effective at the next shot boundary. Immediate safe-state is reserved for safety faults, not ordinary user cancel.
+- `committing` or terminal states: cancel is rejected as too late or returned idempotently if already terminal.
+
+Every cancel keeps both request time and effective time because queued-job cancellation and in-flight run abortion can be separated by a shot boundary.
 
 ## Submission path: admission gateway → authority
 
 Submission is two named stages (ADR-0001):
 
-1. **Admission** (EliteDesk Job Validator/Submitter, a thin gateway): checks the `RunRequest` is well-formed, the caller's role permits the verb (RBAC), the `template_name` is on the allow-list, and the referenced descriptor exists. Admission is a *pure pre-check* — it holds no run state. On pass it forwards to the Tower `Scheduler.Submit`; on fail it rejects before the run ever enters the queue.
-2. **Compile-validation** (Tower L4, the `submitted → validated` FSM edge): evaluates parameter bounds against the *active* descriptor + snapshot, compiles, and attaches the `validation_token`. This is authority-side because it needs the active calibration and bound evaluation.
+1. **Admission** (EliteDesk Admission Validator/Submitter): checks the `RunRequest` is well-formed, the caller's role permits the verb (RBAC), the `template_name` is on the allow-list, the active descriptor and active snapshot can be resolved, requested calibrations are fresh at `submitted_at`, and static semantic checks pass. Normal submissions pin the active descriptor. Explicit `requested_descriptor_id` is allowed only for replay/debug/admin flows and must reference an existing immutable descriptor. On pass admission records `submitted_at`, pins `descriptor_id` + `snapshot_id`, and appends an `AcceptedJob` to the EliteDesk pending queue; on stale calibration it blocks enqueue and triggers the calibration DAG; on other fail it rejects before the job can be dequeued for execution.
+2. **Compile-validation** (Tower L4, the `submitted → validated` FSM edge): dequeues an `AcceptedJob`, records `execution_started_at`, re-validates the pinned descriptor + snapshot against current authority-side constraints, re-checks requested calibration freshness at `execution_started_at`, compiles, and attaches the `validation_token`. This is authority-side because it needs live hardware state and final bound evaluation. If pinned calibration is stale at execution time, the Tower marks the job `blocked_calibration`, triggers the DAG, and requires resubmission or an explicit user/operator "refresh and rebind" action. If the pinned snapshot is otherwise no longer permitted, the job is rejected/requeued by explicit policy rather than silently rebound to a newer snapshot.
 
-In v1 (co-located on the Tower) the gateway and scheduler are the same host; the stage boundary is preserved so the EliteDesk split is a deployment move, not a redesign.
+In `v1-dev` the admission queue and scheduler may be co-located on the Tower; the stage boundary is preserved so the `v1-lab` EliteDesk split is a deployment move, not a redesign.
 
 ## Run-control verbs
 
 ```proto
 service Scheduler {
-  rpc Submit(RunRequest) returns (RunPlan);  // called by the admission gateway, not end clients directly
-  rpc Cancel(CancelRequest) returns (CancelResponse);
+  rpc Enqueue(RunRequest) returns (AcceptedJob);        // called by clients through the admission gateway
+  rpc DequeueForExecution(Empty) returns (RunPlan);     // called by the Tower scheduler
+  rpc Cancel(CancelRequest) returns (CancelResponse);   // routed to EliteDesk for pending jobs, Tower for active runs
   rpc Status(StatusRequest) returns (stream StatusEvent);
   rpc ListRuns(ListRunsRequest) returns (ListRunsResponse);
 

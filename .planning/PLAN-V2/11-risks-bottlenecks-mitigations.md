@@ -6,7 +6,7 @@ Risks fall into four bands by severity × likelihood. Each carries a *mitigation
 
 ## Latency / throughput bottlenecks
 
-### B1 — `insert_input_stream` payload-scaling unknown
+### B1 — `push_to_input_stream` payload-scaling unknown
 *Likelihood:* medium · *Severity:* high
 - **Symptom:** Rearrangement-loop p99 exceeds budget.
 - **Mitigation:** Phase 0A measurement (see §07 acceptance gates) freezes the budget before contracts are written.
@@ -59,7 +59,7 @@ Risks fall into four bands by severity × likelihood. Each carries a *mitigation
 
 ### B8 — Off-host replica lag
 *Likelihood:* medium · *Severity:* medium
-- **Symptom:** raw_state stuck at `pending`; gap between local lake and replica.
+- **Symptom:** `raw_state` stuck at `metadata_mirrored` or shot `state='commit_pending'`; gap between local lake and replica.
 - **Mitigation:** dashboard tile shows replica lag; alert thresholds in §05.
 - **Measurement:** lag tile updated each minute; alert at ≥ 1 h sustained.
 - **Escape:** rotate the USB-pair replicas more frequently; or upgrade to NAS-backed replica.

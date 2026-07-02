@@ -19,7 +19,7 @@ This document defines the *durable shot-commit protocol* that prevents the failu
 Each shot produces:
 
 1. **One raw HDF5 file** under `<lake>/YYYY/MM/DD/<run_uuid>/shot_<index>.h5` with datasets:
-   - `image_andor_initial`, `image_andor_final` (uint16) — EMCCD frames before the first and after the last rearrangement loop. A shot runs **≤ 2 rearrangement loops**; only these two endpoints are persisted (no per-loop series).
+   - `image_andor_initial`, `image_andor_final` (uint16) — EMCCD frames before the first and after the last rearrangement loop. A shot runs nominally **2 rearrangement loops, with a hard maximum of 3**; only these two endpoints are persisted (no per-loop series).
    - `image_<aux>` (per GigE / USB camera that participated)
    - `occupation_matrix_initial`, `occupation_matrix_final` (uint8, from in-shot classifier) — matched to the initial/final frames.
    - `qua_outputs/<stream_name>` (small QUA `stream_processing` arrays)
@@ -49,7 +49,7 @@ Time ─────────────────────────
                   │                                       │ (after local-durable     │ BEGIN TX
                   │                                       │  spool fsync above, the  │   INSERT shots
                   │                                       │  shot is already         │   INSERT raw_manifests
-                  │                                       │  recoverable: state      │   raw_state='pending'
+                  │                                       │  recoverable: state      │   raw_state='metadata_mirrored'
                   │                                       │  raw_spooled)            │ COMMIT
                   │                                       │                          │
                   │                                       └─ mirrors to DB ──────────┘
@@ -66,16 +66,17 @@ Time ─────────────────────────
                                     │
                                     ├── gRPC: ConfirmReplicated(shot_uuid)
                                     ▼
-                                                 UPDATE shots SET raw_state='lake'
-                                                 (only after off-host ack received)
+                                                 UPDATE shots SET raw_state='replicated',
+                                                   state='committed'
+                                                 (only after metadata mirror + off-host ack)
 ```
 
 Failure modes covered:
 - **Broker dies after fsync but before gRPC**: on restart, the broker re-reads the spool and replays the `ShotResult` gRPC, using `shot_uuid` as idempotency key. The scheduler dedupes.
 - **Orchestrator process dies before mirroring**: the shot is already `raw_spooled` (locally durable on Tower); on restart the orchestrator re-reads the spool and replays the DB mirror, `shot_uuid` as idempotency key.
-- **Postgres / EliteDesk unreachable (cross-host partition)**: the shot stays locally durable as `raw_spooled`; the orchestrator buffers the DB mirror and replays it when Postgres returns. Run execution continues — run/shot state is Tower-local-authoritative, the DB is the mirror (see 04 run-FSM authority note). No data loss; the DB simply lags.
-- **Tower disk fails after gRPC but before lake write**: shot row is in DB with `raw_state='pending'` and a manifest hash. The off-host replica is the recovery source — if not yet ack'd, the shot is marked `raw_lost` via operator workflow.
-- **Off-host replica delayed**: shots stay `raw_state='pending'` until ack. Spool is retained.
+- **Postgres / EliteDesk unreachable (cross-host partition)**: the shot stays locally durable as `raw_spooled`; the orchestrator buffers the DB mirror and replays it when Postgres returns. Run execution continues — run/shot execution may finish Tower-local, but the global durable state remains `raw_spooled` / `commit_pending` until metadata is mirrored and raw is replicated.
+- **Tower disk fails after DB mirror but before off-host replication**: shot row is in DB with `raw_state='metadata_mirrored'` and a manifest hash. If the local spool/lake copy is gone and no off-host replica ack exists, the shot is marked `raw_state='lost'` via operator workflow.
+- **Off-host replica delayed**: shots stay `raw_state='metadata_mirrored'` and `state='commit_pending'` until ack. Spool is retained.
 
 RPO / RTO targets (to be hardened in Phase 3):
 
@@ -86,6 +87,10 @@ RPO / RTO targets (to be hardened in Phase 3):
 | Off-host replica fails | 0 (local lake retained) | ≤ 24 h (delayed off-host sync) |
 | Lab switch fails | 0 (all writes local) | ≤ 30 min |
 | Building power loss | spool fsync = guarantee | ≤ 4 h |
+
+### `v1-dev` commissioning-data posture
+
+The first Phase 5 commissioning demo may run with all roles co-located on the Tower. Its outputs are **commissioning data**, not durable scientific data: they may validate platform function but must not support durable analysis or publication claims. In that posture, Tower-disk loss may lose raw commissioning data and the local metadata store. The non-negotiable requirement is **internal consistency** before any result is called committed: no orphaned DB rows and no `committed` shot without verified raw. Runs and shots produced in this posture must carry `durability_tier = 'v1-dev_non_durable'`; dashboards and exports must display that tier. Paper-quality / routine scientific data waits for the `v1-lab` split where the EliteDesk store and off-host replica are active.
 
 ## Postgres schema (load-bearing tables)
 
@@ -182,8 +187,25 @@ CREATE TABLE execution_bundles (
     created_at      TIMESTAMPTZ NOT NULL
 );
 
+CREATE TABLE accepted_jobs (
+    job_uuid        UUID PRIMARY KEY,
+    user_id         TEXT NOT NULL,
+    template_name   TEXT NOT NULL,
+    parameters      JSONB NOT NULL,
+    descriptor_id   BIGINT NOT NULL REFERENCES device_descriptors(id),
+    snapshot_id     BIGINT NOT NULL REFERENCES calibration_snapshots(id),
+    state           TEXT NOT NULL,          -- pending/dequeued/rejected/cancelled/blocked_calibration
+    submitted_at    TIMESTAMPTZ NOT NULL,  -- accepted into EliteDesk pending queue
+    cancel_requested_at TIMESTAMPTZ,
+    cancel_requested_by TEXT,
+    cancel_effective_at TIMESTAMPTZ,
+    idempotency_key TEXT NOT NULL,
+    UNIQUE (user_id, idempotency_key)
+);
+
 CREATE TABLE runs (
     run_uuid        UUID PRIMARY KEY,
+    job_uuid        UUID NOT NULL REFERENCES accepted_jobs(job_uuid),
     user_id         TEXT NOT NULL,
     template_name   TEXT NOT NULL,
     parameters      JSONB NOT NULL,
@@ -191,11 +213,14 @@ CREATE TABLE runs (
     descriptor_id   BIGINT NOT NULL REFERENCES device_descriptors(id),
     bundle_id       BIGINT NOT NULL REFERENCES execution_bundles(id),
     state           TEXT NOT NULL,          -- run state machine
-    submitted_at    TIMESTAMPTZ NOT NULL,
-    started_at      TIMESTAMPTZ,
+    submitted_at    TIMESTAMPTZ NOT NULL,  -- copied from accepted_jobs for query convenience
+    execution_started_at TIMESTAMPTZ,
+    cancel_requested_at TIMESTAMPTZ,
+    cancel_requested_by TEXT,
+    cancel_effective_at TIMESTAMPTZ,
     ended_at        TIMESTAMPTZ,
-    idempotency_key TEXT NOT NULL,
-    UNIQUE (user_id, idempotency_key)
+    durability_tier TEXT NOT NULL CHECK (durability_tier IN ('v1-dev_non_durable','v1-lab_durable')),
+    idempotency_key TEXT NOT NULL
 );
 
 CREATE TABLE shots (
@@ -203,13 +228,14 @@ CREATE TABLE shots (
     run_uuid        UUID NOT NULL REFERENCES runs(run_uuid),
     shot_index      INT NOT NULL,
     state           TEXT NOT NULL,          -- shot state machine
-    raw_state       TEXT NOT NULL CHECK (raw_state IN ('pending','lake','lost')),
+    raw_state       TEXT NOT NULL CHECK (raw_state IN ('raw_spooled','metadata_mirrored','replicated','lost')),
     status          TEXT NOT NULL,          -- ok/failed/skipped/aborted/unsafe
     started_at      TIMESTAMPTZ,
     ended_at        TIMESTAMPTZ,
     timing          JSONB,                  -- PPU ticks
     analysis        JSONB,                  -- control-relevant analysis
     safety_state    JSONB,
+    durability_tier TEXT NOT NULL CHECK (durability_tier IN ('v1-dev_non_durable','v1-lab_durable')),
     UNIQUE (run_uuid, shot_index)
 );
 

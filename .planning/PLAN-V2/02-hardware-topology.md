@@ -5,7 +5,7 @@
 | Machine | Role | Hosted processes | Why |
 |---|---|---|---|
 | **HP Z2 Tower (`PC1`)** | Run-execution authority + latency domain: orchestrator + broker + framegrabber + GPU pipeline + raw spool | Orchestrator process (scheduler, run FSM, lifecycle coordinator, calibration-DAG runner); Compiler; Broker process; Andor service; Compute service; Data-lake writer | (a) BitFlow Axion 1xB + RTX 4000 Ada must share PCIe topology for GPUDirect for Video. (b) Andor iXon is PCIe-bound. (c) Co-located avoids any cross-host hop on the rearrangement loop. (d) The orchestrator drives the broker→OPX directly; only the Tower has L2 reach into VLAN 50, so run authority *must* sit here (see per-host reachability). (e) A8 risk bounded by keeping the durable registry off this host. See ADR-0001. |
-| **HP EliteDesk 800 G6** | Job validation + persistence domain: validator/submitter, metadata DB | Job Validator/Submitter; Postgres; read-only dashboard backend; off-host raw replica; TFTP for network backups | (a) Durable calibration registry on a different host than the executor → Tower crash never poisons history. (b) The Validator is a pure function of `DeviceDescriptor` + `RunRequest`; it gates submissions but cannot advance run state. (c) Win 10 LTSC: longest support runway, lowest churn. **v1: co-located on the Tower; moves here in a later distribution step.** |
+| **HP EliteDesk 800 G6** | Job admission + persistence domain: pending queue, admission validator/submitter, metadata DB | Admission Validator/Submitter; pending job queue; Postgres; read-only dashboard backend; off-host raw replica; TFTP for network backups | (a) Durable calibration registry on a different host than the executor → Tower crash never poisons history. (b) The Admission Validator gates submissions and owns pending jobs but cannot advance run state. (c) Win 10 LTSC: longest support runway, lowest churn. **`v1-dev`: co-located on the Tower; `v1-lab`: moves here before routine scientific operation.** |
 | **HP Z2 Mini (`PC2`)** | SLM domain + secondary compute | SLM device service; holography compute; emulator host | (a) SLM HDMI cannot relocate. (b) Mini's GPU + 64 GB RAM is sufficient for Gerchberg–Saxton / WPGS. (c) Provides a fallback GPU service so Tower is not a single point of failure for general GPU work. |
 | **Lenovo ThinkCentre (`PC3`)** | Slow-instrument domain | GigE camera services; USB camera services; misc instrument services (Arduinos, PSUs, oscilloscopes) | (a) GigE / USB don't need GPU. (b) Isolates slow-image traffic from the Tower NIC. (c) 16 GB sufficient for buffered acquisition. |
 | **OPX+ + QM router** | Real-time domain | PPU firmware + QUA bytecode | Vendor-required topology; AOD waveform synthesis end-to-end. |
@@ -70,15 +70,15 @@ This resolves critique F-10: OPX management/status reachability is via the Tower
 
 ### Tower (orchestrator processes)
 
-- **Orchestrator / compiler / DAG runner** = long-running Python process(es). Run FSM, lifecycle coordinator, queue, calibration-DAG traversal. Only the Tower advances run state. Hot reload via Windows service wrappers (e.g. `nssm`).
+- **Orchestrator / compiler / DAG runner** = long-running Python process(es). Run FSM, lifecycle coordinator, active execution queue, calibration-DAG traversal. Only the Tower advances run state. Hot reload via Windows service wrappers (e.g. `nssm`).
 
 ### EliteDesk
 
-- **Job Validator/Submitter** = single long-running Python process. Validates `RunRequest` → `RunPlan` against the `DeviceDescriptor`; submits to the Tower orchestrator. Stateless w.r.t. run lifecycle.
+- **Admission Validator/Submitter** = single long-running Python process. Performs submit-time semantic validation, records `submitted_at`, owns the pending job queue, and submits accepted jobs to the Tower orchestrator. Stateless w.r.t. run lifecycle.
 - **Postgres** on local NVMe. WAL streaming to an off-host backup target (NAS, USB rotation, or institutional storage). Not to the Tower (same failure domain as the broker).
 - **Read-only dashboard backend** = FastAPI on a separate port, separate process. Cannot mutate any DB row (DB role enforces).
 
-> **v1 note:** the Validator + Postgres + replica run on the Tower in v1; this section describes the distributed end-state.
+> **v1 note:** in `v1-dev`, the Admission Validator + Postgres + replica may run on the Tower; this section describes the `v1-lab` distributed end-state.
 
 ### Mini
 
@@ -103,7 +103,7 @@ This resolves critique F-10: OPX management/status reachability is via the Tower
 | Failed host | Effect on in-flight run | Effect on history | Recovery |
 |---|---|---|---|
 | Tower | In-flight shot fails (broker is the loop owner); local raw spool may have partial bytes; safety plane brings RF/AOD to safe state | History intact (registry is on EliteDesk) | Power cycle Tower (~5 min); broker reconnects to OPX; scheduler marks failed shot |
-| EliteDesk | OPX run continues (orchestrator + DAG runner are on the Tower); broker buffers shot records to local spool; **new submissions blocked** (Validator unreachable) and durable commit pauses | Postgres WAL on NVMe + off-host replica = no committed-row loss | Restart EliteDesk; broker drains spool into Postgres |
+| EliteDesk | OPX run continues (orchestrator + DAG runner are on the Tower); broker buffers shot records to local spool; **new submissions blocked** (Admission Validator unreachable) and durable commit pauses at `raw_spooled` / `commit_pending` | Postgres WAL on NVMe + off-host replica = no committed-row loss for already mirrored data; unmirrored Tower spool drains after recovery | Restart EliteDesk; broker drains spool into Postgres |
 | Mini | SLM frame freezes at last value (HDMI is stateful); rearrangement unaffected | History intact | Restart; recompute hologram from current descriptor |
 | ThinkCentre | Slow-camera shots fail; Andor on Tower unaffected | History intact | Restart |
 | OPX+ | Run halts; safety plane fires | History intact | Restart cluster via QM admin; reconnect |

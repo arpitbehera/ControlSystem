@@ -93,7 +93,7 @@ The host wall time at arm is recorded for human-readability; downstream alignmen
 
 Critique F-18 again: ordering is the database's job, not NTP's.
 
-- Run sequence within the lab = `runs.run_uuid` plus `runs.submitted_at` (server-side).
+- Job submission sequence within the lab = `accepted_jobs.submitted_at` (EliteDesk-side). Run execution sequence = `runs.execution_started_at` plus `runs.run_uuid` (Tower-side).
 - Shot sequence within a run = `shots.shot_index` (compiler-assigned).
 - Calibration history = `calibration_executions.generated_at` + `calibration_snapshots.published_at`, both server-side.
 
@@ -105,6 +105,6 @@ Before any contracts are frozen, Phase 0A must measure (critique F-08, F-09):
 
 1. Wall-clock and PPU-tick alignment across ≥ 10⁵ shots: confirm the host-wall stamp at arm has < 100 ms jitter relative to PPU.
 2. NTP offset across the four lab hosts after 24 h cold start: ≤ 10 ms sustained.
-3. Round-trip `insert_input_stream → advance_input_stream` latency on the lab's OPX+ at representative payload sizes (16 B, 256 B, 1 KB, 8 KB). Required: p50, p95, p99, p99.9, max. Source of truth: PPU `get_timestamp()` from inside QUA. *Host-side ICMP / ping is excluded — Windows scheduler-bound, not informative.*
+3. Round-trip `push_to_input_stream → advance_input_stream` latency on the lab's OPX+ at representative homogeneous `int` vector sizes. Test separate QUA programs whose declared input-stream sizes are `{4, 64, 256, 2048, BATCH_WORDS}` words, corresponding to `{16 B, 256 B, 1 KB, 8 KB, target}` byte-equivalents for 32-bit words. Required: p50, p95, p99, p99.9, max. Source of truth: PPU `get_timestamp()` from inside QUA. *Host-side ICMP / ping is excluded — Windows scheduler-bound, not informative.*
 
 These results gate the rearrangement-loop contract design in §07.

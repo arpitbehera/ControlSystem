@@ -49,7 +49,7 @@ Inner ─── PPU watchdog (per-shot deadline)        ─── milliseconds
     │
 Mid ─── Broker watchdog (per-process)              ─── seconds
     │
-    │   trips: insert_input_stream raises, framegrabber stalls, GPU error
+    │   trips: `push_to_input_stream` raises, framegrabber stalls, GPU error
     │   action: signal OPX to halt next shot, surface to scheduler, Disarm
     │
 Outer ── Scheduler watchdog (per-run)              ─── tens of seconds
@@ -66,6 +66,8 @@ Last ── Hardware E-stop                            ─── instantaneous
 The PPU watchdog is the **load-bearing** one for hung input streams (critique F-03 root concern). It is implemented as the bounded form of `advance_input_stream` followed by a deadline check in QUA — see §07 for the wire-message validation.
 
 ## Recovery posture
+
+Partial rearrangement is not a safety recovery path. The PPU may play a partial move-set only when a syntactically valid, bounds-valid `RearrangementBatchV1` arrives before its deadline with `n_moves` smaller than the ideal move count. Missing, late, malformed, stale-snapshot, stale-descriptor, or out-of-bounds batches trip safe state and do not play.
 
 | Trip class | Recovery action | Authorization |
 |---|---|---|
@@ -96,19 +98,20 @@ class ValidationToken:
 Properties:
 - Tokens cannot be forged by L2 / L3 / L5 — the HMAC key lives only in L4.
 - Tokens expire fast. A run that sits in the queue past expiry is recompiled (L4 re-attaches a fresh token).
-- The broker validates the token signature and the `(descriptor_id, snapshot_id)` against the current active pointer; mismatch → reject.
+- The broker validates the token signature, expiry, bounds hash, and exact match to the `RtJobSubmission` pinned IDs: `descriptor_id`, `snapshot_id`, and `execution_bundle_id` (or `run_uuid`). It does **not** compare pinned IDs to current active pointers; Tower compile-validation already decided whether a queued job's pinned descriptor/snapshot are still permitted.
 
 ## Validation tests
 
 Phase 0A (mandatory) — fault-injection tests that **must** all pass before any user runs:
 
 1. Kill the broker process during a run. PPU enters safe state within one shot. Recovery requires Disarm-Arm.
-2. Drop the next expected `insert_input_stream` payload. PPU's `advance_input_stream` deadline trips; safe-state pulse plays; surface as `safety_trip`.
+2. Drop the next expected input-stream payload. PPU's `advance_input_stream` deadline trips; safe-state pulse plays; surface as `safety_trip`.
 3. Inject a `RearrangementBatchV1` with wrong `protocol_version`. PPU enters safe state; never plays the chirp.
-4. Inject a `RearrangementBatchV1` with mismatched `snapshot_hash32`. Same.
-5. Inject a move with frequency/amplitude outside descriptor bounds. Compiler refuses to compile; if injected post-compile (synthetic test), PPU enters safe state.
-6. Power-cycle the OPX+ mid-run. Scheduler marks run `unsafe`; safety plane (shutters / RF amp via hardware) brings apparatus to safe state independent of OPX state.
-7. Trip hardware E-stop. All shutters close + RF amp disable within hardware latency (sub-ms target).
+4. Inject a `RearrangementBatchV1` with mismatched `snapshot_hash64`. Same.
+5. Inject a `RearrangementBatchV1` with mismatched `descriptor_hash64`. Same.
+6. Inject a move with frequency/amplitude outside descriptor bounds. Compiler refuses to compile; if injected post-compile (synthetic test), PPU enters safe state.
+7. Power-cycle the OPX+ mid-run. Scheduler marks run `unsafe`; safety plane (shutters / RF amp via hardware) brings apparatus to safe state independent of OPX state.
+8. Trip hardware E-stop. All shutters close + RF amp disable within hardware latency (sub-ms target).
 
 These are durable acceptance gates; they re-run on every major version bump.
 
