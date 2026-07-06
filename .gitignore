@@ -1,13 +1,53 @@
+# Local secrets and machine-specific config
 /.secrets/
+.env
+.env.*
+!.env.example
+!.env.template
+
+# Agent/editor local state
 /.claude/
 /.worktrees/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Python environments and caches
 .venv/
+venv/
+env/
 __pycache__/
+*.py[cod]
+*$py.class
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.pyre/
+.tox/
+.nox/
+
+# Coverage and test output
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
+.hypothesis/
+
+# Build/package output
 dist/
 build/
 *.egg-info/
+
+# Runtime/log/temp output
+logs/
+*.log
+tmp/
+temp/
+.tmp/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+desktop.ini
