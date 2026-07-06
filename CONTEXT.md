@@ -53,6 +53,9 @@ The time an accepted job enters the EliteDesk pending job queue.
 ### Execution start time
 The time the Tower begins executing a dequeued job.
 
+### Idempotency key
+A caller-provided token used to make retrying a mutating request safe. It identifies an exact request replay, not a reusable name for future work. Reusing the same key for a different request is rejected rather than silently returning an older job.
+
 **Deployment note:** `v1-dev` may run all roles (Orchestrator, Broker, Admission Validator, Postgres, data lake) **co-located on the Tower** for bring-up and testing, but it does not provide the Tower-crash durability guarantee. `v1-lab` keeps run authority on the Tower and moves Admission Validator + Postgres + replica to the EliteDesk before routine scientific operation.
 
 ### v1-dev
@@ -63,6 +66,9 @@ Data produced before the [[v1-lab]] durability split. It may be used to validate
 
 ### v1-lab
 The routine scientific-run deployment. Tower keeps execution authority; EliteDesk hosts admission, pending jobs, metadata, calibration registry, and replica duties.
+
+### Pre-Phase-1 software readiness
+A planning status meaning the software-side control-plane slice is ready for review and dry-run validation, but the lab has **not** passed the Phase 0A measurement and safety gates. It is not equivalent to PLAN-V2 Phase 1 completion. Phase 1 remains blocked until the hardware evidence for the rearrangement RT contract, latency budget, process discipline, safety-plane independence, and clock-drift baseline is recorded.
 
 ### Device descriptor
 An immutable description of the controllable physical system: channels, geometry, timing, bounds, and safety-relevant limits. Accepted jobs pin one descriptor. Normal submissions use the active descriptor at submission time; explicit descriptor selection is reserved for replay/debug/admin flows.

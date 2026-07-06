@@ -2,7 +2,7 @@
 
 **Source:** `.planning/PLAN-V2/` (15-document architecture set), `CONTEXT.md` glossary, ADR seed list (PLAN-V2 §13).
 **Status:** Derived PRD for starting implementation. Where this PRD and PLAN-V2 disagree, PLAN-V2 wins.
-**Companion:** `PLAN.md` — step-by-step implementation plan for the first slice (Phase 0 bootstrap → Phase 1 exit gate + Phase 0A harness code).
+**Companion:** `PLAN.md` — step-by-step implementation plan for the first slice (Phase 0 bootstrap → Pre-Phase-1 software-readiness gate + Phase 0A harness code).
 
 ---
 
@@ -32,7 +32,7 @@ Build the six-layer control platform specified in PLAN-V2:
 - **Fake-first, contract-tested.** Every adapter ships after its fake; one parametrized contract-test suite drives fakes and reals through the same code path.
 - **Phase 0A measurement spike** precedes contract freezing: `push_to_input_stream` latency curves, GPUDirect bring-up, `N_MAX_MOVES` derivation, process-discipline study, safety-plane independence tests, NTP drift baseline.
 
-Implementation starts with the Phase 0/1 slice in `PLAN.md`: repository bootstrap, proto contracts, lifecycle FSM + contract tests, one fake device, Postgres schema v1, admission validator, orchestrator skeleton, operator CLI, and the Phase 0A hardware-harness code.
+Implementation starts with the Pre-Phase-1 software-readiness slice in `PLAN.md`: repository bootstrap, proto contracts, lifecycle FSM + contract tests, fake camera, fake OPX lifecycle shell, Postgres schema v1, admission validator, orchestrator skeleton, operator CLI, and the Phase 0A hardware-harness code. That slice does not complete PLAN-V2 Phase 1 until Phase 0A's hardware gates pass.
 
 ## User Stories
 
@@ -41,7 +41,7 @@ Implementation starts with the Phase 0/1 slice in `PLAN.md`: repository bootstra
 3. As an **operator**, I want to see the live state of my run (`submitted → validated → planned → armed → executing → committing → completed`), so that I know what the system is doing.
 4. As an **operator**, I want to cancel a pending job or an executing run, with the cancel taking effect at the next shot boundary, so that I can stop bad runs without tripping safety.
 5. As an **operator**, I want a `RunSummary` (shot counts, status, duration, pinned snapshot/descriptor/bundle IDs) at the end of every run, so that I can immediately assess outcomes.
-6. As an **operator**, I want re-submitting the same request with the same idempotency key to be deduplicated, so that a flaky terminal doesn't double-run an experiment.
+6. As an **operator**, I want re-submitting the same request with the same idempotency key to be deduplicated, and reusing that key with different payload to be rejected as `idempotency_key_reused`, so that a flaky terminal doesn't double-run an experiment or silently point me at old work.
 7. As an **operator**, I want stale calibration to block my run and automatically trigger the calibration DAG, so that I never take data against expired parameters without knowing.
 8. As an **operator**, I want the dashboard/CLI to distinguish "execution complete, commit pending" from "committed", so that I know when data is actually durable.
 9. As a **senior operator**, I want to publish a calibration snapshot transactionally after fitness checks pass, so that a bad candidate can never silently poison future runs.
@@ -73,7 +73,7 @@ Implementation starts with the Phase 0/1 slice in `PLAN.md`: repository bootstra
 
 ## Implementation Decisions
 
-Decisions below are copied from PLAN-V2 (docs 00–13); the ADR IDs are the authority.
+Decisions below are copied from PLAN-V2 (docs 00–13) except where the readiness plan explicitly marks a provisional correction for Phase 0A validation; the ADR IDs are the authority once ratified.
 
 **Topology & authority**
 - Tower = run-execution authority: orchestrator + compiler + broker; only the Tower advances run state. EliteDesk = admission validation + pending queue + durable store; deterministic admission so it can run co-located (`v1-dev`) or split (`v1-lab`) without redesign (ADR-0001).
@@ -82,15 +82,17 @@ Decisions below are copied from PLAN-V2 (docs 00–13); the ADR IDs are the auth
 
 **Contracts (5+ year freezes)**
 - Lifecycle verbs: `health, capabilities, configure, arm, start, stop, status, disarm`; verbs may be added, never silently changed.
+- Managed-device `Disarm` always invokes adapter safe-default handling and returns to `UNINIT`; the next `Arm` requires fresh `Configure`. Direct `RUNNING → Disarm` is emergency abort / E-stop / watchdog only; graceful cancel uses shot-boundary `Stop → STOPPED → Disarm` (ADR-0017).
 - Run model: `RunRequest`, `AcceptedJob`, `RunPlan`, `ShotResult`, `RunSummary`; run FSM and shot FSM as specified in PLAN-V2 §04, with cancel carrying both request and effective timestamps.
 - Provenance chain: `code_commit_sha + descriptor_id + snapshot_id + execution_bundle_id → run_uuid → shot_uuid`; same IDs in DB rows and HDF5 attributes.
-- `RearrangementBatchV1`: fixed-width homogeneous QUA `int` vector, 13 header words + 6 words/move; PPU validates version, sequence, hashes, deadline, bounds; missing/late/malformed → safe state; valid partial batches play best-effort (ADR-0002, provisional until Phase 0A).
+- `RearrangementBatchV1`: fixed-width homogeneous QUA `int` vector; the readiness plan uses a provisional signed-QUA-safe header (16 header words, 64-bit fields split into three 31-bit chunks) + 6 words/move; PPU validates version, sequence, hashes, deadline, bounds; missing/late/malformed → safe state; valid partial batches play best-effort (ADR-0002, provisional until Phase 0A).
 - `N_MAX_MOVES = 1024` is a placeholder; Phase 0A must derive it from descriptor geometry + assignment policy and prove the OPX/QOP stack accepts the resulting declaration.
 
 **Calibration & persistence**
 - Immutable `calibration_snapshots` + append-only `parameter_versions` + candidate `calibration_executions`; currency via append-only `snapshot_activations` / `descriptor_activations` logs (ADR-0003). In-house DAG runner built to the QUAlibrate *shape*, not the library (ADR-0015).
 - Per-run `execution_bundles` (compiled QUA + QM config + Python lockfile + firmware + dirty-worktree flag) (ADR-0004).
 - Durable shot commit: broker fsync spool → `raw_spooled` → idempotent gRPC → single-transaction metadata mirror → async off-host replication → `committed` only after replica ack (ADR-0005). `durability_tier ∈ {v1-dev_non_durable, v1-lab_durable}` is a first-class column.
+- Run, shot, accepted-job, durability, and raw-state domains are enforced in Postgres with `CHECK` constraints in addition to Python FSM checks. The DB must not accept impossible lifecycle states even if a writer or migration is wrong.
 - PostgreSQL 16, Alembic migrations, SQLAlchemy 2.x (raw SQL on hot paths); HDF5-per-shot in v1 behind a stable manifest schema — container re-benchmarked in Phase 5 (ADR-0013).
 
 **Timing & safety**
@@ -110,8 +112,8 @@ Decisions below are copied from PLAN-V2 (docs 00–13); the ADR IDs are the auth
 
 - **Good tests assert external behavior at a contract boundary** — FSM transitions observed through the gRPC surface, rows observed in Postgres, rejections observed as typed errors — never internal call sequences or private state.
 - **Contract tests are the architectural deliverable** (REQUIREMENTS.md TEST-01): one pytest suite in `tests/contract/` parametrized across every device-service implementation (`fake_camera, fake_slm, fake_psu, fake_lock, fake_arduino, fake_opx` in v1). New device classes opt in by passing the same suite; the suite drives the full verb FSM, idempotent re-issue, fault surfacing, and heartbeat behavior.
-- **Unit tests (pytest)** cover pure logic: run/shot FSM transition tables, batch encoding, validation-token issue/verify, admission pinning, idempotency dedup.
-- **Integration tests** run against dockerized Postgres + fake broker/fake OPX; they cover enqueue → dequeue → compile-validate → fake-execute → `RunSummary` row.
+- **Unit tests (pytest)** cover pure logic: run/shot FSM transition tables, batch encoding including signed-QUA word bounds, validation-token issue/verify, admission pinning, idempotency dedup and key-reuse rejection.
+- **Integration tests** start with dockerized Postgres + lifecycle-only fakes in the readiness slice; Phase 2 adds the fake broker/fake OPX execution path covering enqueue → dequeue → compile-validate → fake-execute → `RunSummary` row.
 - **Fault-injection tests** (network faults via toxiproxy-equivalent, process kills, dropped payloads, malformed batches) assert the documented failure outcome, not mere survival.
 - **Hardware smoke tests** live in `tests/hardware/`, are excluded from CI, run manually at bring-up, and double as the Phase 0A measurement harness; each Phase 0A test is a re-runnable script.
 - **Gates:** `pytest-cov` ≥ 80% on orchestrator, device servers, compiler, and the broker's pure-logic paths; `ruff` + `black` + `mypy --strict` on orchestrator, compiler, contracts, and broker. CI: lint + unit + contract + integration + `alembic upgrade head` on a throwaway DB, per PR.
@@ -132,7 +134,7 @@ Per PLAN-V2 §00 non-goals and §10:
 
 ## Further Notes
 
-- **Ordering constraint:** Phase 0A measurements gate ADR-0002/0010/0016 acceptance and the `RearrangementBatchV1` freeze. Software work that doesn't depend on those numbers (proto contracts, lifecycle FSM, fakes, schema v1, admission, orchestrator skeleton) can proceed in parallel — that is exactly the slice `PLAN.md` covers.
+- **Ordering constraint:** Phase 0A measurements gate ADR-0002/0010 acceptance and the `RearrangementBatchV1` freeze. They confirm ADR-0016 under measured run+compute contention, and may trigger its reversal condition if the GPU-locality premise breaks, but do not gate ADR-0016 acceptance. Software work that doesn't depend on those numbers (proto contracts, lifecycle FSM, fakes, fake OPX lifecycle shell, schema v1, admission, orchestrator skeleton) can proceed as a Pre-Phase-1 readiness slice, but PLAN-V2 Phase 1 is not complete until W0A-1...W0A-5 are written complete. The provisional batch encoder exists to feed representative Phase 0A payloads; it does not freeze `N_MAX_MOVES` or `BATCH_WORDS`.
 - **Deployment posture:** everything in the starting slice runs co-located on the Tower (`v1-dev`), but the Admission Validator ↔ orchestrator boundary is a gRPC seam from day one so the `v1-lab` EliteDesk split is a deployment move, not a redesign.
 - **ADR discipline:** the seed list in PLAN-V2 §13 becomes real files under `docs/adr/` as decisions are ratified; ADR-0001 and ADR-0016 are already Accepted and should be committed as files during repo bootstrap.
 - **Repository layout** follows PLAN-V2 §10 (`proto/`, `schema/`, `src/`, `tests/`, `network/`, `ops/`, `docs/adr/`).

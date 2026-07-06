@@ -2,13 +2,15 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Stand the repository up from empty to the PLAN-V2 Phase 1 exit gate (control-plane skeleton: contracts, lifecycle FSM, contract tests, one fake device, Postgres schema v1, admission validator, orchestrator skeleton, operator CLI) plus the Phase 0A hardware-measurement harness code.
+**Goal:** Stand the repository up from empty to a **Pre-Phase-1 software-readiness gate**: the control-plane implementation can satisfy the software-side Phase 1 evidence (contracts, lifecycle FSM, contract tests, fake camera, fake OPX lifecycle shell, Postgres schema v1, admission validator, orchestrator skeleton, operator CLI) and the Phase 0A hardware-measurement harness code exists. This does **not** satisfy PLAN-V2 Phase 1 until Phase 0A's hardware gates have passed.
 
 **Architecture:** Modular monolith, `src/` layout per PLAN-V2 §10. Tower is run-execution authority; EliteDesk admission is a separate gRPC seam from day one even though `v1-dev` co-locates everything. Fake-first: every service implements the eight-verb lifecycle contract and passes one shared contract-test suite before any real hardware code exists. Phase 0A harness scripts are written now, executed later in the lab.
 
 **Tech Stack:** Python 3.11+, gRPC + proto3 (`grpcio`, `grpcio-tools`), PostgreSQL 16 + SQLAlchemy 2.x + Alembic + psycopg3, pytest + pytest-cov, ruff + black + mypy --strict, typer CLI, uv for lockfile.
 
 **Spec:** `.planning/PLAN-V2/` (authoritative) and `PRD.md` (distillation). Where this plan simplifies, PLAN-V2 wins.
+
+**Phase naming reconciliation:** PLAN-V2 §00 marks the long-lived control contracts as the things to preserve, while PLAN-V2 §12 makes Phase 0A a safety- and measurement-motivated prerequisite before entering Phase 1. This plan resolves that tension by producing software readiness only: control-plane contracts can be reviewed and exercised, but RT contract freezing, `N_MAX_MOVES`, the latency budget, process discipline, and safety-plane independence remain blocked on W0A-1...W0A-5. No PLAN-V2 gate is weakened.
 
 ## Global Constraints
 
@@ -20,10 +22,10 @@
 - `durability_tier` values are exactly `v1-dev_non_durable` and `v1-lab_durable` (PLAN-V2 §04/§05).
 - Immutable tables (`device_descriptors`, `calibration_snapshots`) never get `valid_until` or UPDATEs; currency lives only in append-only `*_activations` logs (ADR-0003).
 - `mypy --strict`, `ruff`, `black` on `src/orchestrator/`, `src/compiler/`, `src/device_servers/`, `src/broker/`, contracts; coverage gate 80% on those packages (PLAN-V2 §10).
-- Every mutating verb takes an `idempotency_key`; dedup by `(user, key)` (PLAN-V2 §04).
+- Every mutating verb takes an `idempotency_key`; payload-bearing lifecycle verbs dedup device-locally by `(verb, key, request_hash)`, while scheduler/admission mutations dedup by `(user, key, request_hash)`. Key reuse in the same scope with a different canonical request hash is a typed rejection (`idempotency_key_reused`), never silent reuse. `Stop` and `Disarm` are state-idempotent only; stale keys must never suppress `on_disarm`.
 - Commit after every green test cycle; Conventional Commits format.
 
-**Deviation resolved in this plan (record in ADR if contested):** PLAN-V2 §04's FSM diagram shows `STOPPED → disarm → CONFIGURED`, while risk B13 says "Disarm is idempotent and forces re-`Configure` before the next `Arm`". This plan implements the B13 semantics: `disarm` from any of `CONFIGURED / ARMED / STOPPED / FAULT` → `UNINIT`; idempotent no-op at `UNINIT`. No driver-cached state survives a disarm.
+**Deviation resolved in ADR-0017:** PLAN-V2 §04's FSM diagram showed `STOPPED → disarm → CONFIGURED`, while the §04 prose and risk B13 say `Disarm` returns the service to `UNINIT` and forces re-`Configure` before the next `Arm`. This plan implements the canonical semantics: `disarm` from any of `CONFIGURED / ARMED / RUNNING / STOPPED / FAULT` → `UNINIT`; idempotent no-op at `UNINIT`. Direct `RUNNING → disarm` is emergency abort / E-stop / watchdog only; graceful cancel uses shot-boundary `stop → STOPPED → disarm`. The adapter's `on_disarm` hook, not the FSM, enforces descriptor-defined `safe_default` from every entry state. No driver-cached state survives a disarm.
 
 **Prerequisite note (Task 7+):** integration tests need Docker with `postgres:16`. Start it with the exact command given in Task 7.
 
@@ -36,7 +38,7 @@
 - Create: `src/orchestrator/__init__.py`, `src/compiler/__init__.py`, `src/descriptor/__init__.py`, `src/calibration/__init__.py`, `src/broker/__init__.py`, `src/device_servers/__init__.py`, `src/device_servers/_base/__init__.py`, `src/safety/__init__.py`, `src/dashboards/__init__.py`, `src/proto_gen/__init__.py`
 - Create: `tests/__init__.py`, `tests/unit/__init__.py`, `tests/contract/__init__.py`, `tests/integration/__init__.py`, `tests/fault_injection/__init__.py`, `tests/hardware/README.md`
 - Create: `proto/.gitkeep`, `schema/.gitkeep`, `network/.gitkeep`, `ops/runbooks/.gitkeep`, `docs/adr/.gitkeep`
-- Create: `docs/adr/0001-execution-authority-and-broker-placement.md`, `docs/adr/0016-gpu-mutex-locality.md`
+- Create: `docs/adr/0001-execution-authority-and-broker-placement.md`, `docs/adr/0016-gpu-mutex-locality.md`, `docs/adr/0017-lifecycle-disarm-returns-uninit.md`
 - Create: `.github/workflows/ci.yml`
 
 **Interfaces:**
@@ -127,9 +129,18 @@ Manual bring-up + Phase 0A measurement harness. Run only in the lab, on the Towe
 Each script is re-runnable and writes JSON results next to itself.
 ```
 
-- [ ] **Step 3: Write the two Accepted ADRs**
+- [ ] **Step 3: Write the three ADRs**
 
 Copy the full **ADR-0001** and **ADR-0016** entries verbatim from `.planning/PLAN-V2/13-architectural-decisions.md` into `docs/adr/0001-execution-authority-and-broker-placement.md` and `docs/adr/0016-gpu-mutex-locality.md`, using the ADR template header from the same file (`Status: Accepted`).
+
+Create `docs/adr/0017-lifecycle-disarm-returns-uninit.md` from the lifecycle decision resolved during planning:
+
+```markdown
+# ADR-0017: Lifecycle Disarm Returns to UNINIT
+Status: Accepted
+
+Managed device `Disarm` always tears down to `UNINIT`, including from `CONFIGURED`, `ARMED`, `RUNNING`, `STOPPED`, and `FAULT`; re-issuing `Disarm` at `UNINIT` is an idempotent no-op. `CONFIGURED` after disarm would preserve driver-cached configuration and violate the hidden-global-state mitigation in B13. Direct `Disarm` from `RUNNING` exists only for emergency abort / E-stop / watchdog paths; graceful cancel still uses shot-boundary `Stop` before `Disarm`. Reversal condition: revisit only if measured device throughput requires a warm reconfigure path, with explicit proof that no driver-cached last-set values can leak across runs.
+```
 
 - [ ] **Step 4: Write `.github/workflows/ci.yml`**
 
@@ -212,6 +223,11 @@ message CameraCapabilities {
   repeated string trigger_modes = 3;
 }
 message SlmCapabilities { uint32 width = 1; uint32 height = 2; double refresh_ms = 3; }
+message OpxCapabilities {
+  string qop_version = 1;
+  repeated string analog_outputs = 2;
+  repeated string digital_outputs = 3;
+}
 
 message Capabilities {
   string service_id = 1;
@@ -221,6 +237,7 @@ message Capabilities {
   oneof specific {
     CameraCapabilities camera = 10;
     SlmCapabilities slm = 11;
+    OpxCapabilities opx = 12;
   }
 }
 
@@ -277,6 +294,7 @@ message AcceptedJob {
   int64 descriptor_id = 3;                // pinned at admission
   int64 snapshot_id = 4;                  // pinned at admission
   string submitted_at = 5;                // RFC3339
+  bytes request_hash = 6;                 // sha256 over canonical request payload
 }
 
 message Rejection { string code = 1; string reason = 2; }
@@ -458,6 +476,17 @@ def test_disarm_forces_reconfigure_before_next_arm() -> None:
     assert not fsm.apply(Verb.ARM).ok
 
 
+def test_direct_disarm_from_running_is_emergency_teardown() -> None:
+    fsm = LifecycleFsm()
+    fsm.apply(Verb.CONFIGURE)
+    fsm.apply(Verb.ARM)
+    fsm.apply(Verb.START)
+    result = fsm.apply(Verb.DISARM)
+    assert result.ok
+    assert fsm.state is DeviceState.UNINIT
+    assert not fsm.apply(Verb.ARM).ok
+
+
 def test_fault_then_disarm_recovers_to_uninit() -> None:
     fsm = LifecycleFsm()
     fsm.apply(Verb.CONFIGURE)
@@ -488,8 +517,10 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'device_servers._base.
 ```python
 """Lifecycle FSM shared by every managed device service (PLAN-V2 §04).
 
-Disarm semantics follow risk B13 (disarm forces re-Configure before the next
-Arm), which supersedes the §04 diagram's STOPPED->CONFIGURED edge.
+Disarm semantics follow §04 prose, risk B13, and ADR-0017: disarm forces
+re-Configure before the next Arm and always returns to UNINIT. Direct
+RUNNING->disarm is emergency teardown only; graceful cancel uses stop first.
+Safe-default enforcement belongs in adapter on_disarm hooks, not in this FSM.
 """
 
 from __future__ import annotations
@@ -531,6 +562,7 @@ _TRANSITIONS: dict[tuple[DeviceState, Verb], DeviceState] = {
     # B13: disarm from any post-configure state -> UNINIT
     (DeviceState.CONFIGURED, Verb.DISARM): DeviceState.UNINIT,
     (DeviceState.ARMED, Verb.DISARM): DeviceState.UNINIT,
+    (DeviceState.RUNNING, Verb.DISARM): DeviceState.UNINIT,
     (DeviceState.STOPPED, Verb.DISARM): DeviceState.UNINIT,
     (DeviceState.FAULT, Verb.DISARM): DeviceState.UNINIT,
 }
@@ -570,7 +602,7 @@ class LifecycleFsm:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/unit/test_lifecycle_fsm.py -v`
-Expected: PASS (9 tests)
+Expected: PASS (10 tests)
 
 - [ ] **Step 5: Commit**
 
@@ -606,6 +638,7 @@ class _Recorder(DeviceAdapter):
     def __init__(self) -> None:
         self.calls: list[str] = []
         self.fail_on: str | None = None
+        self.safe_default_applied = False
 
     def _hook(self, name: str) -> None:
         if self.fail_on == name:
@@ -616,7 +649,9 @@ class _Recorder(DeviceAdapter):
     def on_arm(self, run_uuid: str) -> None: self._hook("arm")
     def on_start(self, run_uuid: str) -> None: self._hook("start")
     def on_stop(self) -> None: self._hook("stop")
-    def on_disarm(self) -> None: self._hook("disarm")
+    def on_disarm(self) -> None:
+        self.safe_default_applied = True
+        self._hook("disarm")
 
     def capabilities(self) -> lifecycle_pb2.Capabilities:
         return lifecycle_pb2.Capabilities(service_id="rec", firmware="0", driver_version="0")
@@ -663,6 +698,74 @@ def test_noop_reissue_does_not_recall_hook() -> None:
     svc.Configure(lifecycle_pb2.ConfigureRequest(config_yaml=""), None)
     svc.Configure(lifecycle_pb2.ConfigureRequest(config_yaml=""), None)
     assert adapter.calls == ["configure"]
+
+
+def test_configure_exact_replay_uses_cache_before_fsm() -> None:
+    svc, adapter = _service()
+    first = svc.Configure(lifecycle_pb2.ConfigureRequest(config_yaml="cfg", idempotency_key="cfg-1"), None)
+    assert first.ok
+    assert svc.Arm(lifecycle_pb2.ArmRequest(run_uuid="r1", idempotency_key="arm-1"), None).ok
+    replay = svc.Configure(lifecycle_pb2.ConfigureRequest(config_yaml="cfg", idempotency_key="cfg-1"), None)
+    assert replay.ok == first.ok and replay.error == first.error
+    assert adapter.calls == ["configure", "arm"]
+    assert svc.fsm.state is DeviceState.ARMED
+
+
+def test_arm_key_reuse_with_different_payload_rejected() -> None:
+    svc, adapter = _service()
+    svc.Configure(lifecycle_pb2.ConfigureRequest(config_yaml="cfg", idempotency_key="cfg-1"), None)
+    assert svc.Arm(lifecycle_pb2.ArmRequest(run_uuid="r1", idempotency_key="arm-1"), None).ok
+    resp = svc.Arm(lifecycle_pb2.ArmRequest(run_uuid="r2", idempotency_key="arm-1"), None)
+    assert not resp.ok and resp.error == "idempotency_key_reused"
+    assert adapter.calls == ["configure", "arm"]
+
+
+def test_direct_disarm_from_running_applies_safe_default() -> None:
+    svc, adapter = _service()
+    svc.Configure(lifecycle_pb2.ConfigureRequest(config_yaml=""), None)
+    svc.Arm(lifecycle_pb2.ArmRequest(run_uuid="r1"), None)
+    svc.Start(lifecycle_pb2.StartRequest(run_uuid="r1"), None)
+    assert svc.Disarm(lifecycle_pb2.DisarmRequest(), None).ok
+    assert svc.fsm.state is DeviceState.UNINIT
+    assert adapter.calls[-1] == "disarm"
+    assert adapter.safe_default_applied
+
+
+def test_stop_then_disarm_applies_safe_default() -> None:
+    svc, adapter = _service()
+    svc.Configure(lifecycle_pb2.ConfigureRequest(config_yaml=""), None)
+    svc.Arm(lifecycle_pb2.ArmRequest(run_uuid="r1"), None)
+    svc.Start(lifecycle_pb2.StartRequest(run_uuid="r1"), None)
+    svc.Stop(lifecycle_pb2.StopRequest(), None)
+    assert svc.Disarm(lifecycle_pb2.DisarmRequest(), None).ok
+    assert svc.fsm.state is DeviceState.UNINIT
+    assert adapter.calls[-2:] == ["stop", "disarm"]
+    assert adapter.safe_default_applied
+
+
+def test_disarm_reused_key_still_invokes_safe_default() -> None:
+    svc, adapter = _service()
+    svc.Configure(lifecycle_pb2.ConfigureRequest(config_yaml="cfg1", idempotency_key="cfg-1"), None)
+    svc.Arm(lifecycle_pb2.ArmRequest(run_uuid="r1", idempotency_key="arm-1"), None)
+    svc.Start(lifecycle_pb2.StartRequest(run_uuid="r1", idempotency_key="start-1"), None)
+    svc.Disarm(lifecycle_pb2.DisarmRequest(idempotency_key="disarm-1"), None)
+    first_disarm_count = adapter.calls.count("disarm")
+    svc.Configure(lifecycle_pb2.ConfigureRequest(config_yaml="cfg2", idempotency_key="cfg-2"), None)
+    svc.Arm(lifecycle_pb2.ArmRequest(run_uuid="r2", idempotency_key="arm-2"), None)
+    svc.Start(lifecycle_pb2.StartRequest(run_uuid="r2", idempotency_key="start-2"), None)
+    assert svc.Disarm(lifecycle_pb2.DisarmRequest(idempotency_key="disarm-1"), None).ok
+    assert adapter.calls.count("disarm") == first_disarm_count + 1
+
+
+def test_status_events_fan_out_to_all_subscribers() -> None:
+    svc, _ = _service()
+    s1 = svc.Status(lifecycle_pb2.StatusRequest(), None)
+    s2 = svc.Status(lifecycle_pb2.StatusRequest(), None)
+    next(s1)  # subscriber-local heartbeat
+    next(s2)
+    svc.Configure(lifecycle_pb2.ConfigureRequest(config_yaml=""), None)
+    assert next(s1).kind == "transition"
+    assert next(s2).kind == "transition"
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -678,7 +781,10 @@ Expected: FAIL with `ModuleNotFoundError` (no `device_servers._base.service`)
 from __future__ import annotations
 
 import abc
+import hashlib
+import json
 import queue
+import threading
 import time
 from typing import Any, Iterator
 
@@ -706,39 +812,80 @@ class DeviceAdapter(abc.ABC):
     def capabilities(self) -> lifecycle_pb2.Capabilities: ...
 
 
+_CACHEABLE_VERBS = {Verb.CONFIGURE, Verb.ARM, Verb.START}
+
+
+def _payload_hash(*parts: str) -> bytes:
+    canonical = json.dumps(parts, separators=(",", ":")).encode()
+    return hashlib.sha256(canonical).digest()
+
+
 class LifecycleService(lifecycle_pb2_grpc.ManagedDeviceServicer):
     def __init__(self, adapter: DeviceAdapter, service_id: str) -> None:
         self.adapter = adapter
         self.service_id = service_id
         self.fsm = LifecycleFsm()
-        self._events: "queue.Queue[lifecycle_pb2.StatusEvent]" = queue.Queue()
+        self._subscribers: set["queue.Queue[lifecycle_pb2.StatusEvent]"] = set()
+        self._subscribers_lock = threading.Lock()
+        # Pre-Phase-1 slice only: in-memory, unbounded cache; production adds TTL/eviction.
+        self._idempotency: dict[tuple[Verb, str], tuple[bytes, bool, str]] = {}
+        self._idempotency_lock = threading.Lock()
 
     # -- verb plumbing -------------------------------------------------
-    def _emit(self, kind: str, detail: str = "") -> None:
-        self._events.put(
-            lifecycle_pb2.StatusEvent(
-                service_id=self.service_id,
-                state=self.fsm.state.value,
-                kind=kind,
-                detail=detail,
-                wall_ns=time.time_ns(),
-            )
+    def _event(self, kind: str, detail: str = "") -> lifecycle_pb2.StatusEvent:
+        return lifecycle_pb2.StatusEvent(
+            service_id=self.service_id,
+            state=self.fsm.state.value,
+            kind=kind,
+            detail=detail,
+            wall_ns=time.time_ns(),
         )
 
-    def _do(self, verb: Verb, hook: Any, *args: Any) -> tuple[bool, str]:
+    def _emit(self, kind: str, detail: str = "") -> None:
+        event = self._event(kind, detail)
+        with self._subscribers_lock:
+            subscribers = list(self._subscribers)
+        for subscriber in subscribers:
+            subscriber.put(event)
+
+    def _do(
+        self,
+        verb: Verb,
+        idempotency_key: str,
+        request_hash: bytes,
+        hook: Any,
+        *args: Any,
+    ) -> tuple[bool, str]:
+        cache_key = (verb, idempotency_key) if idempotency_key and verb in _CACHEABLE_VERBS else None
+        if cache_key is not None:
+            with self._idempotency_lock:
+                cached = self._idempotency.get(cache_key)
+            if cached is not None:
+                cached_hash, cached_ok, cached_error = cached
+                if cached_hash != request_hash:
+                    return False, "idempotency_key_reused"
+                return cached_ok, cached_error
+
         pre = self.fsm.apply(verb)
         if not pre.ok:
-            return False, pre.error or "invalid transition"
-        if pre.noop:
-            return True, ""
-        try:
-            hook(*args)
-        except DeviceFaultError as exc:
-            self.fsm.fault(str(exc))
-            self._emit("fault", str(exc))
-            return False, str(exc)
-        self._emit("transition", verb.value)
-        return True, ""
+            ok, error = False, pre.error or "invalid transition"
+        elif pre.noop:
+            ok, error = True, ""
+        else:
+            try:
+                hook(*args)
+            except DeviceFaultError as exc:
+                self.fsm.fault(str(exc))
+                self._emit("fault", str(exc))
+                ok, error = False, str(exc)
+            else:
+                self._emit("transition", verb.value)
+                ok, error = True, ""
+
+        if cache_key is not None:
+            with self._idempotency_lock:
+                self._idempotency[cache_key] = (request_hash, ok, error)
+        return ok, error
 
     # -- ManagedDevice RPCs --------------------------------------------
     def Health(self, request: lifecycle_pb2.HealthRequest, context: Any) -> lifecycle_pb2.HealthResponse:
@@ -752,38 +899,63 @@ class LifecycleService(lifecycle_pb2_grpc.ManagedDeviceServicer):
         return self.adapter.capabilities()
 
     def Configure(self, request: lifecycle_pb2.ConfigureRequest, context: Any) -> lifecycle_pb2.ConfigureResponse:
-        ok, err = self._do(Verb.CONFIGURE, self.adapter.on_configure, request.config_yaml)
+        ok, err = self._do(
+            Verb.CONFIGURE,
+            request.idempotency_key,
+            _payload_hash(request.config_yaml),
+            self.adapter.on_configure,
+            request.config_yaml,
+        )
         return lifecycle_pb2.ConfigureResponse(ok=ok, error=err)
 
     def Arm(self, request: lifecycle_pb2.ArmRequest, context: Any) -> lifecycle_pb2.ArmResponse:
-        ok, err = self._do(Verb.ARM, self.adapter.on_arm, request.run_uuid)
+        ok, err = self._do(
+            Verb.ARM,
+            request.idempotency_key,
+            _payload_hash(request.run_uuid),
+            self.adapter.on_arm,
+            request.run_uuid,
+        )
         return lifecycle_pb2.ArmResponse(ok=ok, error=err)
 
     def Start(self, request: lifecycle_pb2.StartRequest, context: Any) -> lifecycle_pb2.StartResponse:
-        ok, err = self._do(Verb.START, self.adapter.on_start, request.run_uuid)
+        ok, err = self._do(
+            Verb.START,
+            request.idempotency_key,
+            _payload_hash(request.run_uuid),
+            self.adapter.on_start,
+            request.run_uuid,
+        )
         return lifecycle_pb2.StartResponse(ok=ok, error=err)
 
     def Stop(self, request: lifecycle_pb2.StopRequest, context: Any) -> lifecycle_pb2.StopResponse:
-        ok, err = self._do(Verb.STOP, self.adapter.on_stop)
+        ok, err = self._do(Verb.STOP, request.idempotency_key, b"", self.adapter.on_stop)
         return lifecycle_pb2.StopResponse(ok=ok, error=err)
 
     def Disarm(self, request: lifecycle_pb2.DisarmRequest, context: Any) -> lifecycle_pb2.DisarmResponse:
-        ok, err = self._do(Verb.DISARM, self.adapter.on_disarm)
+        ok, err = self._do(Verb.DISARM, request.idempotency_key, b"", self.adapter.on_disarm)
         return lifecycle_pb2.DisarmResponse(ok=ok, error=err)
 
     def Status(self, request: lifecycle_pb2.StatusRequest, context: Any) -> Iterator[lifecycle_pb2.StatusEvent]:
-        self._emit("heartbeat")
-        while True:
-            try:
-                yield self._events.get(timeout=1.0)
-            except queue.Empty:
-                self._emit("heartbeat")
+        events: "queue.Queue[lifecycle_pb2.StatusEvent]" = queue.Queue()
+        with self._subscribers_lock:
+            self._subscribers.add(events)
+        try:
+            yield self._event("heartbeat")
+            while context is None or context.is_active():
+                try:
+                    yield events.get(timeout=1.0)
+                except queue.Empty:
+                    yield self._event("heartbeat")
+        finally:
+            with self._subscribers_lock:
+                self._subscribers.discard(events)
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/unit/test_lifecycle_service.py -v`
-Expected: PASS (5 tests)
+Expected: PASS (11 tests)
 
 - [ ] **Step 5: Commit**
 
@@ -794,21 +966,23 @@ git commit -m "feat: LifecycleService base with adapter hooks and fault handling
 
 ---
 
-### Task 5: Contract test suite + fake camera (W1-4 part 2, W1-5)
+### Task 5: Contract test suite + fake camera + fake OPX lifecycle shell (W1-4 part 2, W1-5, W1-6a)
 
 **Files:**
 - Create: `tests/contract/conftest.py`, `tests/contract/test_lifecycle_contract.py`
 - Create: `src/device_servers/fake_camera/__init__.py`, `src/device_servers/fake_camera/adapter.py`, `src/device_servers/fake_camera/main.py`
+- Create: `src/device_servers/fake_opx/__init__.py`, `src/device_servers/fake_opx/adapter.py`, `src/device_servers/fake_opx/main.py`
 
 **Interfaces:**
 - Consumes: `LifecycleService`, `DeviceAdapter`, `DeviceFaultError` (Task 4); `proto_gen` (Task 2).
-- Produces: contract suite parametrized over a `service_factories` registry (`dict[str, Callable[[], LifecycleService]]`); `FakeCameraAdapter(DeviceAdapter)`; `serve(port: int) -> grpc.Server` in `fake_camera.main`. Every future device service adds one factory entry and inherits the whole suite — the base contract never changes (PLAN-V2 §04).
+- Produces: contract suite parametrized over a `service_factories` registry (`dict[str, Callable[[], ServiceCase]]`); each `ServiceCase` includes a `LifecycleService` plus test probes for configure/arm/disarm counts, proving cached replays skip payloaded hooks while repeated `Disarm` keys still reach the descriptor-defined safe default. Fakes expose counters; real adapters must probe observable safe-state actions for their device family. Produces `FakeCameraAdapter(DeviceAdapter)`; `FakeOpxAdapter(DeviceAdapter)`; `serve(port: int) -> grpc.Server` in both fake service `main.py` modules. The fake OPX is lifecycle-only: eight verbs and typed capabilities, no `QuantumMachinesManager`, no `RtJobResult`, no batch-push RPC. Those remain W2-1/W2-3. Every future device service adds one factory entry and inherits the whole suite — the base contract never changes (PLAN-V2 §04).
 
 - [ ] **Step 1: Write the contract suite (failing)**
 
 `tests/contract/conftest.py`:
 
 ```python
+from dataclasses import dataclass
 from typing import Callable
 
 import pytest
@@ -816,21 +990,53 @@ import pytest
 from device_servers._base.service import LifecycleService
 
 
-def _fake_camera() -> LifecycleService:
+@dataclass(frozen=True)
+class ServiceCase:
+    service: LifecycleService
+    configure_count: Callable[[], int]
+    arm_count: Callable[[], int]
+    safe_default_count: Callable[[], int]
+
+
+def _fake_camera() -> ServiceCase:
     from device_servers.fake_camera.adapter import FakeCameraAdapter
 
-    return LifecycleService(FakeCameraAdapter(), service_id="fake_camera")
+    adapter = FakeCameraAdapter()
+    return ServiceCase(
+        service=LifecycleService(adapter, service_id="fake_camera"),
+        configure_count=lambda: adapter.configure_count,
+        arm_count=lambda: adapter.arm_count,
+        safe_default_count=lambda: adapter.safe_default_count,
+    )
+
+
+def _fake_opx() -> ServiceCase:
+    from device_servers.fake_opx.adapter import FakeOpxAdapter
+
+    adapter = FakeOpxAdapter()
+    return ServiceCase(
+        service=LifecycleService(adapter, service_id="fake_opx"),
+        configure_count=lambda: adapter.configure_count,
+        arm_count=lambda: adapter.arm_count,
+        safe_default_count=lambda: adapter.safe_default_count,
+    )
 
 
 # New device services register here; the whole suite runs against each.
-SERVICE_FACTORIES: dict[str, Callable[[], LifecycleService]] = {
+SERVICE_FACTORIES: dict[str, Callable[[], ServiceCase]] = {
     "fake_camera": _fake_camera,
+    "fake_opx": _fake_opx,
 }
 
 
 @pytest.fixture(params=sorted(SERVICE_FACTORIES))
-def service(request: pytest.FixtureRequest) -> LifecycleService:
+def service_case(request: pytest.FixtureRequest) -> ServiceCase:
     return SERVICE_FACTORIES[request.param]()
+
+
+@pytest.fixture
+def service(service_case: ServiceCase) -> LifecycleService:
+    return service_case.service
 ```
 
 `tests/contract/test_lifecycle_contract.py`:
@@ -838,6 +1044,8 @@ def service(request: pytest.FixtureRequest) -> LifecycleService:
 ```python
 """Lifecycle contract: every managed device service must pass all of these
 (REQUIREMENTS.md TEST-01; PLAN-V2 §04). Parametrized via conftest SERVICE_FACTORIES."""
+
+from typing import Any
 
 from proto_gen import lifecycle_pb2
 
@@ -882,6 +1090,68 @@ def test_disarm_forces_reconfigure(service: LifecycleService) -> None:
     service.Arm(lifecycle_pb2.ArmRequest(run_uuid="r1"), None)
     service.Disarm(lifecycle_pb2.DisarmRequest(), None)
     assert not service.Arm(lifecycle_pb2.ArmRequest(run_uuid="r2"), None).ok
+
+
+def test_configure_exact_replay_uses_cache_before_fsm(service_case: Any) -> None:
+    service = service_case.service
+    first = service.Configure(
+        lifecycle_pb2.ConfigureRequest(config_yaml="cfg", idempotency_key="cfg-1"), None
+    )
+    assert first.ok
+    assert service.Arm(lifecycle_pb2.ArmRequest(run_uuid="r1", idempotency_key="arm-1"), None).ok
+    before = service_case.configure_count()
+    replay = service.Configure(
+        lifecycle_pb2.ConfigureRequest(config_yaml="cfg", idempotency_key="cfg-1"), None
+    )
+    assert replay.ok == first.ok and replay.error == first.error
+    assert service_case.configure_count() == before
+    assert service.fsm.state is DeviceState.ARMED
+
+
+def test_arm_key_reuse_with_different_payload_rejected(service_case: Any) -> None:
+    service = service_case.service
+    service.Configure(lifecycle_pb2.ConfigureRequest(config_yaml="cfg", idempotency_key="cfg-1"), None)
+    assert service.Arm(lifecycle_pb2.ArmRequest(run_uuid="r1", idempotency_key="arm-1"), None).ok
+    before = service_case.arm_count()
+    resp = service.Arm(lifecycle_pb2.ArmRequest(run_uuid="r2", idempotency_key="arm-1"), None)
+    assert not resp.ok and resp.error == "idempotency_key_reused"
+    assert service_case.arm_count() == before
+
+
+def test_direct_disarm_from_running_applies_safe_default(service_case: Any) -> None:
+    service = service_case.service
+    service.Configure(lifecycle_pb2.ConfigureRequest(config_yaml=""), None)
+    service.Arm(lifecycle_pb2.ArmRequest(run_uuid="r1"), None)
+    service.Start(lifecycle_pb2.StartRequest(run_uuid="r1"), None)
+    assert service.Disarm(lifecycle_pb2.DisarmRequest(), None).ok
+    assert service.fsm.state is DeviceState.UNINIT
+    assert service_case.safe_default_count() >= 1
+    assert not service.Arm(lifecycle_pb2.ArmRequest(run_uuid="r2"), None).ok
+
+
+def test_stop_then_disarm_applies_safe_default(service_case: Any) -> None:
+    service = service_case.service
+    service.Configure(lifecycle_pb2.ConfigureRequest(config_yaml=""), None)
+    service.Arm(lifecycle_pb2.ArmRequest(run_uuid="r1"), None)
+    service.Start(lifecycle_pb2.StartRequest(run_uuid="r1"), None)
+    service.Stop(lifecycle_pb2.StopRequest(), None)
+    assert service.Disarm(lifecycle_pb2.DisarmRequest(), None).ok
+    assert service.fsm.state is DeviceState.UNINIT
+    assert service_case.safe_default_count() >= 1
+
+
+def test_disarm_reused_key_still_invokes_safe_default(service_case: Any) -> None:
+    service = service_case.service
+    service.Configure(lifecycle_pb2.ConfigureRequest(config_yaml="cfg1", idempotency_key="cfg-1"), None)
+    service.Arm(lifecycle_pb2.ArmRequest(run_uuid="r1", idempotency_key="arm-1"), None)
+    service.Start(lifecycle_pb2.StartRequest(run_uuid="r1", idempotency_key="start-1"), None)
+    service.Disarm(lifecycle_pb2.DisarmRequest(idempotency_key="disarm-1"), None)
+    first_disarm_count = service_case.safe_default_count()
+    service.Configure(lifecycle_pb2.ConfigureRequest(config_yaml="cfg2", idempotency_key="cfg-2"), None)
+    service.Arm(lifecycle_pb2.ArmRequest(run_uuid="r2", idempotency_key="arm-2"), None)
+    service.Start(lifecycle_pb2.StartRequest(run_uuid="r2", idempotency_key="start-2"), None)
+    assert service.Disarm(lifecycle_pb2.DisarmRequest(idempotency_key="disarm-1"), None).ok
+    assert service_case.safe_default_count() == first_disarm_count + 1
 ```
 
 - [ ] **Step 2: Run to verify failure**
@@ -912,11 +1182,16 @@ class FakeCameraAdapter(DeviceAdapter):
         self._height = height
         self._rng = np.random.default_rng(seed)
         self._armed_run: str | None = None
+        self.configure_count = 0
+        self.arm_count = 0
+        self.safe_default_count = 0
 
     def on_configure(self, config_yaml: str) -> None:
+        self.configure_count += 1
         pass  # fake accepts any config
 
     def on_arm(self, run_uuid: str) -> None:
+        self.arm_count += 1
         self._armed_run = run_uuid
 
     def on_start(self, run_uuid: str) -> None:
@@ -927,6 +1202,7 @@ class FakeCameraAdapter(DeviceAdapter):
 
     def on_disarm(self) -> None:
         self._armed_run = None
+        self.safe_default_count += 1
 
     def capabilities(self) -> lifecycle_pb2.Capabilities:
         return lifecycle_pb2.Capabilities(
@@ -979,12 +1255,101 @@ if __name__ == "__main__":
     serve(args.port).wait_for_termination()
 ```
 
-- [ ] **Step 4: Run contract suite to verify pass**
+- [ ] **Step 4: Implement the fake OPX lifecycle shell**
+
+`src/device_servers/fake_opx/adapter.py`:
+
+```python
+"""Fake OPX lifecycle shell: contract-complete, zero QM SDK dependency.
+
+This closes the W1-6 lifecycle/gRPC half only. RtJobResult, batch-push, and
+QuantumMachinesManager integration belong to Phase 2 / Phase 0A.
+"""
+
+from __future__ import annotations
+
+from proto_gen import lifecycle_pb2
+
+from device_servers._base.service import DeviceAdapter
+
+
+class FakeOpxAdapter(DeviceAdapter):
+    def __init__(self) -> None:
+        self._armed_run: str | None = None
+        self.configure_count = 0
+        self.arm_count = 0
+        self.safe_default_count = 0
+
+    def on_configure(self, config_yaml: str) -> None:
+        self.configure_count += 1
+
+    def on_arm(self, run_uuid: str) -> None:
+        self.arm_count += 1
+        self._armed_run = run_uuid
+
+    def on_start(self, run_uuid: str) -> None:
+        pass
+
+    def on_stop(self) -> None:
+        pass
+
+    def on_disarm(self) -> None:
+        self._armed_run = None
+        self.safe_default_count += 1
+
+    def capabilities(self) -> lifecycle_pb2.Capabilities:
+        return lifecycle_pb2.Capabilities(
+            service_id="fake_opx",
+            firmware="fake-qop",
+            driver_version="fake-qm-sdk",
+            opx=lifecycle_pb2.OpxCapabilities(
+                qop_version="fake",
+                analog_outputs=["aod_x", "aod_y"],
+                digital_outputs=["aod_enable", "camera_trigger"],
+            ),
+        )
+```
+
+`src/device_servers/fake_opx/main.py`:
+
+```python
+"""Standalone fake OPX lifecycle service: no QM SDK, no RtJobResult path."""
+
+from __future__ import annotations
+
+import argparse
+from concurrent import futures
+
+import grpc
+
+from proto_gen import lifecycle_pb2_grpc
+
+from device_servers._base.service import LifecycleService
+from device_servers.fake_opx.adapter import FakeOpxAdapter
+
+
+def serve(port: int) -> grpc.Server:
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
+    service = LifecycleService(FakeOpxAdapter(), service_id="fake_opx")
+    lifecycle_pb2_grpc.add_ManagedDeviceServicer_to_server(service, server)
+    server.add_insecure_port(f"127.0.0.1:{port}")  # mTLS lands with the v1-lab split
+    server.start()
+    return server
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port", type=int, default=50062)
+    args = parser.parse_args()
+    serve(args.port).wait_for_termination()
+```
+
+- [ ] **Step 5: Run contract suite to verify pass**
 
 Run: `uv run pytest tests/contract -v`
-Expected: PASS (6 tests, all under param `fake_camera`)
+Expected: PASS (22 tests, params `fake_camera` and `fake_opx`)
 
-- [ ] **Step 5: Smoke the real gRPC transport**
+- [ ] **Step 6: Smoke the real gRPC transport**
 
 Add `tests/integration/test_fake_camera_grpc.py`:
 
@@ -1012,11 +1377,39 @@ def test_fake_camera_over_real_grpc() -> None:
 Run: `uv run pytest tests/integration/test_fake_camera_grpc.py -v`
 Expected: PASS
 
-- [ ] **Step 6: Commit**
+Add `tests/integration/test_fake_opx_grpc.py`:
+
+```python
+import grpc
+
+from proto_gen import lifecycle_pb2, lifecycle_pb2_grpc
+
+from device_servers.fake_opx.main import serve
+
+
+def test_fake_opx_lifecycle_over_real_grpc() -> None:
+    server = serve(50062)
+    try:
+        channel = grpc.insecure_channel("127.0.0.1:50062")
+        stub = lifecycle_pb2_grpc.ManagedDeviceStub(channel)
+        health = stub.Health(lifecycle_pb2.HealthRequest(), timeout=5)
+        assert health.state == "UNINIT"
+        caps = stub.Capabilities(lifecycle_pb2.Empty(), timeout=5)
+        assert caps.WhichOneof("specific") == "opx"
+        assert "aod_x" in caps.opx.analog_outputs
+    finally:
+        server.stop(grace=None)
+```
+
+Run: `uv run pytest tests/integration/test_fake_camera_grpc.py tests/integration/test_fake_opx_grpc.py -v`
+Expected: PASS
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add tests/contract src/device_servers/fake_camera tests/integration/test_fake_camera_grpc.py
-git commit -m "feat: lifecycle contract test suite + fake camera service"
+git add tests/contract src/device_servers/fake_camera src/device_servers/fake_opx \
+        tests/integration/test_fake_camera_grpc.py tests/integration/test_fake_opx_grpc.py
+git commit -m "feat: lifecycle contract suite with fake camera and fake OPX"
 ```
 
 ---
@@ -1086,13 +1479,33 @@ def test_active_descriptor_is_latest_activation(engine: sa.Engine) -> None:
 
 
 def test_runs_reject_bad_durability_tier(engine: sa.Engine) -> None:
-    with engine.connect() as conn:
+    with engine.begin() as conn:
+        job_uuid = conn.execute(sa.text(
+            "INSERT INTO accepted_jobs (job_uuid, user_id, template_name, parameters,"
+            " descriptor_id, snapshot_id, state, submitted_at, idempotency_key, request_hash)"
+            " VALUES (gen_random_uuid(), 'u', 't', '{}', 1, 1, 'pending', NOW(), 'tier-test', :h)"
+            " RETURNING job_uuid"), {"h": b"h"}).scalar_one()
         with pytest.raises(sa.exc.DBAPIError):
             conn.execute(sa.text(
                 "INSERT INTO runs (run_uuid, job_uuid, user_id, template_name, parameters,"
                 " snapshot_id, descriptor_id, state, submitted_at, durability_tier, idempotency_key)"
-                " VALUES (gen_random_uuid(), gen_random_uuid(), 'u', 't', '{}', 1, 1,"
-                " 'submitted', NOW(), 'bogus_tier', 'k')"))
+                " VALUES (gen_random_uuid(), :j, 'u', 't', '{}', 1, 1,"
+                " 'submitted', NOW(), 'bogus_tier', 'k')"), {"j": str(job_uuid)})
+
+
+def test_runs_reject_bad_state(engine: sa.Engine) -> None:
+    with engine.begin() as conn:
+        job_uuid = conn.execute(sa.text(
+            "INSERT INTO accepted_jobs (job_uuid, user_id, template_name, parameters,"
+            " descriptor_id, snapshot_id, state, submitted_at, idempotency_key, request_hash)"
+            " VALUES (gen_random_uuid(), 'u', 't', '{}', 1, 1, 'pending', NOW(), 'state-test', :h)"
+            " RETURNING job_uuid"), {"h": b"h"}).scalar_one()
+        with pytest.raises(sa.exc.DBAPIError):
+            conn.execute(sa.text(
+                "INSERT INTO runs (run_uuid, job_uuid, user_id, template_name, parameters,"
+                " snapshot_id, descriptor_id, state, submitted_at, durability_tier, idempotency_key)"
+                " VALUES (gen_random_uuid(), :j, 'u', 't', '{}', 1, 1,"
+                " 'teleported', NOW(), 'v1-dev_non_durable', 'k')"), {"j": str(job_uuid)})
 ```
 
 - [ ] **Step 2: Run to verify failure**
@@ -1179,12 +1592,13 @@ CREATE TABLE accepted_jobs (
     parameters      JSONB NOT NULL,
     descriptor_id   BIGINT NOT NULL REFERENCES device_descriptors(id),
     snapshot_id     BIGINT NOT NULL REFERENCES calibration_snapshots(id),
-    state           TEXT NOT NULL,
+    state           TEXT NOT NULL CHECK (state IN ('pending','dequeued','rejected','cancelled','blocked_calibration')),
     submitted_at    TIMESTAMPTZ NOT NULL,
     cancel_requested_at TIMESTAMPTZ,
     cancel_requested_by TEXT,
     cancel_effective_at TIMESTAMPTZ,
     idempotency_key TEXT NOT NULL,
+    request_hash    BYTEA NOT NULL,
     UNIQUE (user_id, idempotency_key)
 );
 
@@ -1196,7 +1610,7 @@ CREATE TABLE runs (
     parameters      JSONB NOT NULL,
     snapshot_id     BIGINT NOT NULL REFERENCES calibration_snapshots(id),
     descriptor_id   BIGINT NOT NULL REFERENCES device_descriptors(id),
-    state           TEXT NOT NULL,
+    state           TEXT NOT NULL CHECK (state IN ('submitted','validated','planned','armed','executing','committing','completed','failed','unsafe','aborted','disarmed','rejected')),
     submitted_at    TIMESTAMPTZ NOT NULL,
     execution_started_at TIMESTAMPTZ,
     cancel_requested_at TIMESTAMPTZ,
@@ -1213,7 +1627,7 @@ CREATE TABLE shots (
     shot_uuid       UUID PRIMARY KEY,
     run_uuid        UUID NOT NULL REFERENCES runs(run_uuid),
     shot_index      INT NOT NULL,
-    state           TEXT NOT NULL,
+    state           TEXT NOT NULL CHECK (state IN ('prepared','armed','executing','raw_spooled','metadata_mirrored','replicated','committed','commit_pending','failed','raw_lost','safety_trip','unsafe')),
     raw_state       TEXT NOT NULL CHECK (raw_state IN ('raw_spooled','metadata_mirrored','replicated','lost')),
     status          TEXT NOT NULL,
     started_at      TIMESTAMPTZ,
@@ -1282,7 +1696,7 @@ def active_snapshot_id(conn: sa.Connection, lineage: str = "default") -> int | N
 - [ ] **Step 5: Apply migration and run tests**
 
 Run: `(cd schema && uv run alembic upgrade head) && uv run pytest tests/integration/test_schema_v1.py -v`
-Expected: migration applies; PASS (3 tests)
+Expected: migration applies; PASS (4 tests)
 
 - [ ] **Step 6: Commit**
 
@@ -1466,7 +1880,7 @@ git commit -m "feat: run and shot state machines per PLAN-V2 §04"
 
 **Interfaces:**
 - Consumes: `make_engine`, `active_descriptor_id`, `active_snapshot_id` (Task 6).
-- Produces: `AdmissionValidator(engine: sa.Engine, template_allowlist: frozenset[str])` with `enqueue(user: str, template_name: str, parameters: dict[str, object], idempotency_key: str, requested_descriptor_id: int | None = None) -> AdmissionResult` and `cancel_pending(job_uuid: UUID, requested_by: str) -> bool`. `AdmissionResult` = frozen dataclass `(accepted: bool, job_uuid: UUID | None, descriptor_id: int | None, snapshot_id: int | None, rejection_code: str | None, rejection_reason: str | None)`. Deterministic — runs identically co-located (`v1-dev`) or on the EliteDesk (`v1-lab`), per ADR-0001. Calibration-freshness checks are deferred to Phase 3 (no DAG tables yet) — noted in code.
+- Produces: `AdmissionValidator(engine: sa.Engine, template_allowlist: frozenset[str])` with `enqueue(user: str, template_name: str, parameters: dict[str, object], idempotency_key: str, requested_descriptor_id: int | None = None) -> AdmissionResult` and `cancel_pending(job_uuid: UUID, requested_by: str) -> bool`. `AdmissionResult` = frozen dataclass `(accepted: bool, job_uuid: UUID | None, descriptor_id: int | None, snapshot_id: int | None, request_hash: bytes | None, rejection_code: str | None, rejection_reason: str | None)`. Deterministic — runs identically co-located (`v1-dev`) or on the EliteDesk (`v1-lab`), per ADR-0001. Idempotency stores a canonical request hash; exact replays dedup, while `(user, key)` reuse with a different payload rejects with `idempotency_key_reused`. Calibration-freshness checks are deferred to Phase 3 (no DAG tables yet) — noted in code.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1522,6 +1936,15 @@ def test_idempotency_dedup_returns_same_job(validator: AdmissionValidator) -> No
     assert second.accepted and second.job_uuid == first.job_uuid
 
 
+def test_idempotency_key_reuse_with_different_payload_rejected(validator: AdmissionValidator) -> None:
+    key = _key()
+    first = validator.enqueue("op", "noop_template", {"n": 1}, key)
+    second = validator.enqueue("op", "noop_template", {"n": 2}, key)
+    assert first.accepted
+    assert not second.accepted
+    assert second.rejection_code == "idempotency_key_reused"
+
+
 def test_requested_descriptor_must_exist(validator: AdmissionValidator) -> None:
     res = validator.enqueue("admin", "noop_template", {}, _key(), requested_descriptor_id=999999)
     assert not res.accepted and res.rejection_code == "descriptor_not_found"
@@ -1559,6 +1982,7 @@ Phase 3 DAG tables. RBAC arrives with the mTLS identity layer (v1-lab split).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from dataclasses import dataclass
@@ -1569,12 +1993,28 @@ import sqlalchemy as sa
 from orchestrator.db import active_descriptor_id, active_snapshot_id
 
 
+def _request_hash(
+    *,
+    template_name: str,
+    parameters: dict[str, object],
+    requested_descriptor_id: int | None,
+) -> bytes:
+    payload = {
+        "template_name": template_name,
+        "parameters": parameters,
+        "requested_descriptor_id": requested_descriptor_id,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(canonical).digest()
+
+
 @dataclass(frozen=True)
 class AdmissionResult:
     accepted: bool
     job_uuid: uuid.UUID | None = None
     descriptor_id: int | None = None
     snapshot_id: int | None = None
+    request_hash: bytes | None = None
     rejection_code: str | None = None
     rejection_reason: str | None = None
 
@@ -1598,18 +2038,30 @@ class AdmissionValidator:
                 rejection_code="template_not_allowed",
                 rejection_reason=f"template '{template_name}' is not on the allow-list",
             )
+        req_hash = _request_hash(
+            template_name=template_name,
+            parameters=parameters,
+            requested_descriptor_id=requested_descriptor_id,
+        )
         with self.engine.begin() as conn:
             existing = conn.execute(
-                sa.text("SELECT job_uuid, descriptor_id, snapshot_id FROM accepted_jobs"
+                sa.text("SELECT job_uuid, descriptor_id, snapshot_id, request_hash FROM accepted_jobs"
                         " WHERE user_id = :u AND idempotency_key = :k"),
                 {"u": user, "k": idempotency_key},
             ).one_or_none()
             if existing is not None:
+                if bytes(existing.request_hash) != req_hash:
+                    return AdmissionResult(
+                        accepted=False,
+                        rejection_code="idempotency_key_reused",
+                        rejection_reason="idempotency key already used for a different request payload",
+                    )
                 return AdmissionResult(
                     accepted=True,
                     job_uuid=uuid.UUID(str(existing.job_uuid)),
                     descriptor_id=existing.descriptor_id,
                     snapshot_id=existing.snapshot_id,
+                    request_hash=req_hash,
                 )
 
             if requested_descriptor_id is not None:
@@ -1639,18 +2091,18 @@ class AdmissionValidator:
             conn.execute(
                 sa.text(
                     "INSERT INTO accepted_jobs (job_uuid, user_id, template_name, parameters,"
-                    " descriptor_id, snapshot_id, state, submitted_at, idempotency_key)"
-                    " VALUES (:j, :u, :t, :p, :d, :s, 'pending', :now, :k)"
+                    " descriptor_id, snapshot_id, state, submitted_at, idempotency_key, request_hash)"
+                    " VALUES (:j, :u, :t, :p, :d, :s, 'pending', :now, :k, :h)"
                 ),
                 {
                     "j": str(job_uuid), "u": user, "t": template_name,
                     "p": json.dumps(parameters), "d": descriptor_id, "s": snapshot_id,
-                    "now": datetime.now(timezone.utc), "k": idempotency_key,
+                    "now": datetime.now(timezone.utc), "k": idempotency_key, "h": req_hash,
                 },
             )
         return AdmissionResult(
             accepted=True, job_uuid=job_uuid,
-            descriptor_id=descriptor_id, snapshot_id=snapshot_id,
+            descriptor_id=descriptor_id, snapshot_id=snapshot_id, request_hash=req_hash,
         )
 
     def cancel_pending(self, job_uuid: uuid.UUID, requested_by: str) -> bool:
@@ -1671,7 +2123,7 @@ class AdmissionValidator:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/integration/test_admission.py -v`
-Expected: PASS (5 tests)
+Expected: PASS (6 tests)
 
 - [ ] **Step 5: Commit**
 
@@ -1912,7 +2364,7 @@ git commit -m "feat: orchestrator skeleton with FSM-enforced run advancement and
 
 **Interfaces:**
 - Consumes: `AdmissionValidator` (Task 8), `Orchestrator` (Task 9), `proto_gen.scheduler_pb2_grpc.SchedulerServicer` (Task 2).
-- Produces: `SchedulerService(validator, orchestrator)` implementing `Enqueue`, `Cancel` (routes `target_kind=="job"` → `validator.cancel_pending`, `"run"` → `orchestrator.cancel_run`), `ListRuns`, `Status`; `serve_scheduler(validator, orchestrator, port) -> grpc.Server`; `HeartbeatMonitor(period_s: float = 1.0, miss_threshold: int = 3)` with `beat(service_id: str, now_ns: int) -> None` and `unhealthy(now_ns: int) -> set[str]`.
+- Produces: `SchedulerService(validator, orchestrator)` implementing `Enqueue`, `Cancel` (routes `target_kind=="job"` → `validator.cancel_pending`, `"run"` → `orchestrator.cancel_run`), `ListRuns`, `Status`; `serve_scheduler(validator, orchestrator, port) -> grpc.Server`; `HeartbeatMonitor(expected_services: frozenset[str], period_s: float = 1.0, miss_threshold: int = 3)` with `register(service_id: str) -> None`, `beat(service_id: str, now_ns: int) -> None`, and `unhealthy(now_ns: int) -> set[str]`. Status streams are per-subscriber: no shared `queue.Queue` may be drained by multiple clients. If scheduler later publishes run-state events instead of heartbeat-only events, it must use the same fan-out pattern as `LifecycleService`.
 
 - [ ] **Step 1: Write the failing heartbeat test**
 
@@ -1925,23 +2377,28 @@ NS = 1_000_000_000
 
 
 def test_service_healthy_within_threshold() -> None:
-    mon = HeartbeatMonitor(period_s=1.0, miss_threshold=3)
+    mon = HeartbeatMonitor(expected_services=frozenset({"cam"}), period_s=1.0, miss_threshold=3)
     mon.beat("cam", now_ns=0)
     assert mon.unhealthy(now_ns=2 * NS) == set()
 
 
 def test_service_unhealthy_after_three_misses() -> None:
-    mon = HeartbeatMonitor(period_s=1.0, miss_threshold=3)
+    mon = HeartbeatMonitor(expected_services=frozenset({"cam"}), period_s=1.0, miss_threshold=3)
     mon.beat("cam", now_ns=0)
     assert mon.unhealthy(now_ns=4 * NS) == {"cam"}
 
 
 def test_beat_recovers_service() -> None:
-    mon = HeartbeatMonitor(period_s=1.0, miss_threshold=3)
+    mon = HeartbeatMonitor(expected_services=frozenset({"cam"}), period_s=1.0, miss_threshold=3)
     mon.beat("cam", now_ns=0)
     assert mon.unhealthy(now_ns=4 * NS) == {"cam"}
     mon.beat("cam", now_ns=4 * NS)
     assert mon.unhealthy(now_ns=5 * NS) == set()
+
+
+def test_expected_service_that_never_beats_is_unhealthy() -> None:
+    mon = HeartbeatMonitor(expected_services=frozenset({"cam"}), period_s=1.0, miss_threshold=3)
+    assert mon.unhealthy(now_ns=0) == {"cam"}
 ```
 
 - [ ] **Step 2: Run to verify failure, then implement `src/orchestrator/heartbeat.py`**
@@ -1955,18 +2412,32 @@ from __future__ import annotations
 
 
 class HeartbeatMonitor:
-    def __init__(self, period_s: float = 1.0, miss_threshold: int = 3) -> None:
+    def __init__(
+        self,
+        expected_services: frozenset[str] = frozenset(),
+        period_s: float = 1.0,
+        miss_threshold: int = 3,
+    ) -> None:
+        self._expected = set(expected_services)
         self._window_ns = int(period_s * miss_threshold * 1_000_000_000)
         self._last: dict[str, int] = {}
 
+    def register(self, service_id: str) -> None:
+        self._expected.add(service_id)
+
     def beat(self, service_id: str, now_ns: int) -> None:
+        self._expected.add(service_id)
         self._last[service_id] = now_ns
 
     def unhealthy(self, now_ns: int) -> set[str]:
-        return {sid for sid, t in self._last.items() if now_ns - t > self._window_ns}
+        return {
+            sid
+            for sid in self._expected
+            if sid not in self._last or now_ns - self._last[sid] > self._window_ns
+        }
 ```
 
-Run: `uv run pytest tests/unit/test_heartbeat.py -v` → PASS (3 tests)
+Run: `uv run pytest tests/unit/test_heartbeat.py -v` → PASS (4 tests)
 
 - [ ] **Step 3: Write the failing gRPC test**
 
@@ -2087,6 +2558,7 @@ class SchedulerService(scheduler_pb2_grpc.SchedulerServicer):
                 request=request,
                 descriptor_id=res.descriptor_id or 0,
                 snapshot_id=res.snapshot_id or 0,
+                request_hash=res.request_hash or b"",
             )
         )
 
@@ -2309,7 +2781,7 @@ git commit -m "feat: lab operator CLI (submit-run, cancel, list-runs, status)"
 
 ---
 
-### Task 12: `RearrangementBatchV1` encoder + Phase 0A hardware harness
+### Task 12: provisional `RearrangementBatchV1` encoder + Phase 0A hardware harness
 
 **Files:**
 - Create: `src/broker/rearrangement_batch.py`
@@ -2318,7 +2790,7 @@ git commit -m "feat: lab operator CLI (submit-run, cancel, list-runs, status)"
 
 **Interfaces:**
 - Consumes: nothing in-repo (QUA scripts use `qm-qua`, installed lab-side only — not a project dependency yet).
-- Produces: constants `PROTOCOL_VERSION=1`, `N_MAX_MOVES=1024` (placeholder, ADR-0002), `HEADER_WORDS=13`, `MOVE_WORDS=6`, `BATCH_WORDS`, all `OFF_*` offsets from PLAN-V2 §07; `Move` frozen dataclass `(src_x, src_y, tgt_x, tgt_y, group_id, t_ramp_ticks, flags)` (flags folded into the 6th word alongside group_id per layout below); `encode_batch(...) -> list[int]` and `decode_header(words: Sequence[int]) -> BatchHeader`. This is the broker's pure-logic path — mypy strict + full coverage required (PLAN-V2 §10).
+- Produces: provisional constants `PROTOCOL_VERSION=1`, `N_MAX_MOVES=1024` (placeholder, ADR-0002 remains Proposed), `HEADER_WORDS=16`, `MOVE_WORDS=6`, `BATCH_WORDS`, all `OFF_*` offsets for a signed-QUA-safe candidate layout; `Move` frozen dataclass `(src_x, src_y, tgt_x, tgt_y, group_id, t_ramp_ticks, flags)` (flags folded into the 6th word alongside group_id per layout below); `encode_batch(...) -> list[int]` and `decode_header(words: Sequence[int]) -> BatchHeader`. This is Phase 0A support code for representative payload generation, not a frozen RT contract. It stays provisional until W0A-1 derives `N_MAX_MOVES`, proves OPX/QOP capacity, and composes the measured latency budget. ADR-0002's PLAN-V2 seed uses two 32-bit words for 64-bit fields, but QUA `int` is signed; this task intentionally uses 31-bit chunks so high-bit hashes do not overflow signed QUA words.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2340,8 +2812,8 @@ def _moves(n: int) -> list[Move]:
 
 
 def test_batch_words_constant() -> None:
-    assert HEADER_WORDS == 13 and MOVE_WORDS == 6
-    assert BATCH_WORDS == HEADER_WORDS + N_MAX_MOVES * MOVE_WORDS == 6157
+    assert HEADER_WORDS == 16 and MOVE_WORDS == 6
+    assert BATCH_WORDS == HEADER_WORDS + N_MAX_MOVES * MOVE_WORDS == 6160
 
 
 def test_encode_is_fixed_width_and_padded() -> None:
@@ -2364,6 +2836,7 @@ def test_header_roundtrip_including_64bit_fields() -> None:
     assert header.deadline_ppu_ticks == deadline
     assert header.snapshot_hash64 == (1 << 63) | 5
     assert header.loop_index == 1 and header.max_loops == 3
+    assert max(words[:HEADER_WORDS]) <= 0x7FFF_FFFF
 
 
 def test_truncation_signal_ideal_gt_n_moves_allowed() -> None:
@@ -2391,9 +2864,10 @@ Expected: FAIL (`No module named 'broker.rearrangement_batch'`)
 ```python
 """RearrangementBatchV1 wire layout (PLAN-V2 §07, ADR-0002 — PROVISIONAL until Phase 0A).
 
-Fixed-width homogeneous int vector for the QUA input stream. All 64-bit quantities are
-split into two 32-bit words (lo, hi). Words are masked to 32 bits; QUA ints are signed,
-so producers keep values < 2^31 per word (hashes are pre-truncated to 64 bits then split).
+Fixed-width homogeneous int vector for the QUA input stream. QUA ints are signed, so
+all 64-bit quantities are split into three 31-bit chunks (lo, mid, hi). This avoids
+the high-bit overflow bug from a naive unsigned-32 split. ADR-0002 is still Proposed;
+Phase 0A owns freezing the final wire layout.
 """
 
 from __future__ import annotations
@@ -2403,7 +2877,7 @@ from typing import Sequence
 
 PROTOCOL_VERSION = 1
 N_MAX_MOVES = 1024  # placeholder — Phase 0A derives the real bound (ADR-0002 gate)
-HEADER_WORDS = 13
+HEADER_WORDS = 16
 MOVE_WORDS = 6
 BATCH_WORDS = HEADER_WORDS + N_MAX_MOVES * MOVE_WORDS
 
@@ -2411,17 +2885,20 @@ OFF_PROTOCOL_VERSION = 0
 OFF_SEQUENCE_NO = 1
 OFF_N_MOVES = 2
 OFF_DEADLINE_TICKS_LO = 3
-OFF_DEADLINE_TICKS_HI = 4
-OFF_SNAPSHOT_HASH_LO = 5
-OFF_SNAPSHOT_HASH_HI = 6
-OFF_DESCRIPTOR_HASH_LO = 7
-OFF_DESCRIPTOR_HASH_HI = 8
-OFF_LOOP_INDEX = 9
-OFF_MAX_LOOPS = 10
-OFF_IDEAL_MOVES = 11
-OFF_HEADER_FLAGS = 12
+OFF_DEADLINE_TICKS_MID = 4
+OFF_DEADLINE_TICKS_HI = 5
+OFF_SNAPSHOT_HASH_LO = 6
+OFF_SNAPSHOT_HASH_MID = 7
+OFF_SNAPSHOT_HASH_HI = 8
+OFF_DESCRIPTOR_HASH_LO = 9
+OFF_DESCRIPTOR_HASH_MID = 10
+OFF_DESCRIPTOR_HASH_HI = 11
+OFF_LOOP_INDEX = 12
+OFF_MAX_LOOPS = 13
+OFF_IDEAL_MOVES = 14
+OFF_HEADER_FLAGS = 15
 
-_MASK32 = 0xFFFF_FFFF
+_MASK31 = 0x7FFF_FFFF
 
 
 @dataclass(frozen=True)
@@ -2449,13 +2926,13 @@ class BatchHeader:
     header_flags: int
 
 
-def _split64(value: int) -> tuple[int, int]:
+def _split64(value: int) -> tuple[int, int, int]:
     value &= (1 << 64) - 1
-    return value & _MASK32, (value >> 32) & _MASK32
+    return value & _MASK31, (value >> 31) & _MASK31, (value >> 62) & _MASK31
 
 
-def _join64(lo: int, hi: int) -> int:
-    return (hi << 32) | lo
+def _join64(lo: int, mid: int, hi: int) -> int:
+    return (hi << 62) | (mid << 31) | lo
 
 
 def encode_batch(
@@ -2471,18 +2948,21 @@ def encode_batch(
 ) -> list[int]:
     if len(moves) > N_MAX_MOVES:
         raise ValueError(f"n_moves {len(moves)} exceeds N_MAX_MOVES {N_MAX_MOVES}")
-    dl_lo, dl_hi = _split64(deadline_ppu_ticks)
-    sn_lo, sn_hi = _split64(snapshot_hash64)
-    de_lo, de_hi = _split64(descriptor_hash64)
+    dl_lo, dl_mid, dl_hi = _split64(deadline_ppu_ticks)
+    sn_lo, sn_mid, sn_hi = _split64(snapshot_hash64)
+    de_lo, de_mid, de_hi = _split64(descriptor_hash64)
     words = [0] * BATCH_WORDS
     words[OFF_PROTOCOL_VERSION] = PROTOCOL_VERSION
-    words[OFF_SEQUENCE_NO] = sequence_no & _MASK32
+    words[OFF_SEQUENCE_NO] = sequence_no & _MASK31
     words[OFF_N_MOVES] = len(moves)
     words[OFF_DEADLINE_TICKS_LO] = dl_lo
+    words[OFF_DEADLINE_TICKS_MID] = dl_mid
     words[OFF_DEADLINE_TICKS_HI] = dl_hi
     words[OFF_SNAPSHOT_HASH_LO] = sn_lo
+    words[OFF_SNAPSHOT_HASH_MID] = sn_mid
     words[OFF_SNAPSHOT_HASH_HI] = sn_hi
     words[OFF_DESCRIPTOR_HASH_LO] = de_lo
+    words[OFF_DESCRIPTOR_HASH_MID] = de_mid
     words[OFF_DESCRIPTOR_HASH_HI] = de_hi
     words[OFF_LOOP_INDEX] = loop_index
     words[OFF_MAX_LOOPS] = max_loops
@@ -2504,9 +2984,15 @@ def decode_header(words: Sequence[int]) -> BatchHeader:
         protocol_version=words[OFF_PROTOCOL_VERSION],
         sequence_no=words[OFF_SEQUENCE_NO],
         n_moves=words[OFF_N_MOVES],
-        deadline_ppu_ticks=_join64(words[OFF_DEADLINE_TICKS_LO], words[OFF_DEADLINE_TICKS_HI]),
-        snapshot_hash64=_join64(words[OFF_SNAPSHOT_HASH_LO], words[OFF_SNAPSHOT_HASH_HI]),
-        descriptor_hash64=_join64(words[OFF_DESCRIPTOR_HASH_LO], words[OFF_DESCRIPTOR_HASH_HI]),
+        deadline_ppu_ticks=_join64(
+            words[OFF_DEADLINE_TICKS_LO], words[OFF_DEADLINE_TICKS_MID], words[OFF_DEADLINE_TICKS_HI]
+        ),
+        snapshot_hash64=_join64(
+            words[OFF_SNAPSHOT_HASH_LO], words[OFF_SNAPSHOT_HASH_MID], words[OFF_SNAPSHOT_HASH_HI]
+        ),
+        descriptor_hash64=_join64(
+            words[OFF_DESCRIPTOR_HASH_LO], words[OFF_DESCRIPTOR_HASH_MID], words[OFF_DESCRIPTOR_HASH_HI]
+        ),
         loop_index=words[OFF_LOOP_INDEX],
         max_loops=words[OFF_MAX_LOOPS],
         ideal_moves=words[OFF_IDEAL_MOVES],
@@ -2534,7 +3020,7 @@ import statistics
 import sys
 from pathlib import Path
 
-SIZES = [4, 64, 256, 2048, 6157]  # words; 6157 = BATCH_WORDS at provisional N_MAX_MOVES=1024
+SIZES = [4, 64, 256, 2048, 6160]  # words; 6160 = BATCH_WORDS at provisional N_MAX_MOVES=1024
 N_SAMPLES = 100_000
 OPX_HOST = "192.168.88.10"  # QM router enclave, VLAN 50 — adjust to lab assignment
 
@@ -2560,7 +3046,7 @@ def main() -> None:
     results = {}
     qmm = QuantumMachinesManager(host=OPX_HOST)
     for size in SIZES:
-        # NOTE: capacity check first — if compile/run of size=6157 fails, record it and
+        # NOTE: capacity check first — if compile/run of size=6160 fails, record it and
         # follow the §07 escape (shrink N_MAX_MOVES / multi-batch) before ADR-0002.
         prog = build_program(size)
         # ... open qm with lab config, execute prog, then:
@@ -2676,7 +3162,7 @@ git commit -m "feat: RearrangementBatchV1 encoder + Phase 0A measurement harness
 
 ---
 
-### Task 13: Phase 1 exit-gate verification + milestone record
+### Task 13: Pre-Phase-1 software-readiness verification + milestone record
 
 **Files:**
 - Create: `.planning/MILESTONES.md`
@@ -2684,7 +3170,7 @@ git commit -m "feat: RearrangementBatchV1 encoder + Phase 0A measurement harness
 
 **Interfaces:**
 - Consumes: everything above.
-- Produces: written exit-gate record (PLAN-V2 §12 stop/reassess discipline).
+- Produces: written software-readiness record that explicitly keeps PLAN-V2 §12 Phase 0A/Phase 1 gates blocked where hardware evidence is missing.
 
 - [ ] **Step 1: Run the full verification suite**
 
@@ -2695,9 +3181,9 @@ uv run pytest --cov --cov-fail-under=80 --ignore=tests/hardware
 
 Expected: all green, coverage ≥ 80% on `src/orchestrator`, `src/compiler`, `src/device_servers`, `src/broker`.
 
-- [ ] **Step 2: Walk the Phase 1 exit gate manually**
+- [ ] **Step 2: Walk the software-readiness evidence manually**
 
-Map each PLAN-V2 §12 Phase-1 gate item to its evidence:
+Map each PLAN-V2 §12 Phase-1 software-side gate item to its evidence. This is readiness evidence only, not Phase 1 completion:
 
 1. Orchestrator starts and exposes gRPC; admission enqueues an `AcceptedJob` → `tests/integration/test_scheduler_grpc.py::test_enqueue_returns_accepted_job`.
 2. Fake camera registers, returns typed `Capabilities` + `Health` → `tests/contract/` + `tests/integration/test_fake_camera_grpc.py`.
@@ -2711,35 +3197,59 @@ Map each PLAN-V2 §12 Phase-1 gate item to its evidence:
 ```markdown
 # Milestones
 
-## Phase 1 — Control-Plane Skeleton (v1-dev, co-located)
+## Pre-Phase-1 Software Readiness — Control-Plane Skeleton (v1-dev, co-located)
 Date: <fill on completion>
-Exit gate: items 1–5 met (evidence: test paths above); item 6 partially met
-(heartbeat policy implemented + tested; orchestrator-side UNHEALTHY enforcement
-deferred to Phase 2 first task). Deviations: disarm semantics follow B13 over the
-§04 diagram (see PLAN.md global constraints); calibration-freshness checks and
-RunPlan/validation_token deferred to Phases 2–3 as designed.
-Next: Phase 2 (fake OPX, compiler v0, ShotResult path, observer dashboard) and,
-in parallel, Phase 0A lab measurements using tests/hardware/.
+Status: software-readiness slice complete; PLAN-V2 Phase 1 remains blocked until
+Phase 0A gates pass.
+
+Ready:
+- Control-plane proto contracts, lifecycle FSM, fake-camera contract tests, schema v1,
+  fake OPX lifecycle shell, admission validator, orchestrator skeleton, scheduler gRPC,
+  operator CLI.
+- Provisional `RearrangementBatchV1` encoder + hardware harness code exists for W0A-1
+  representative payloads.
+
+Blocked on W0A-1...W0A-5:
+- RT contract freeze (`RearrangementBatchV1`, `BATCH_WORDS`, `N_MAX_MOVES`);
+- composed latency budget (`t_compute + t_insert + t_execute <= 5 ms`);
+- GPUDirect/CPU baseline and SDK ownership model;
+- broker priority/affinity decision;
+- safety-plane independence and NTP drift evidence.
+
+Not Phase 1 done:
+- Heartbeat policy implemented + tested; orchestrator-side `UNHEALTHY` enforcement
+  still deferred.
+- Compile-validation remains stubbed; full `RunPlan`/`validation_token` path remains
+  Phase 2/3 work.
+- Calibration-freshness checks remain Phase 3 work.
+- Fake OPX is lifecycle-only. Real QM SDK connection, fake execution results, `ShotResult`,
+  and `RunSummary` remain Phase 2/Phase 0A work.
+
+Deviations: lifecycle disarm semantics are recorded in ADR-0017 (§04 diagram vs
+B13 prose reconciliation). No separate ADR is required for the phase-gate naming
+reconciliation.
+Next: run Phase 0A lab measurements using tests/hardware/. Phase 2 does not start
+as a PLAN-V2 phase until the written Phase 0A gate is complete.
 ```
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add .planning/MILESTONES.md README.md
-git commit -m "docs: record Phase 1 exit-gate evidence and deviations"
+git commit -m "docs: record pre-phase-1 software readiness"
 ```
 
 ---
 
 ## What comes next (not in this plan)
 
-- **Phase 0A in the lab (parallel track):** run `tests/hardware/` scripts on the Tower/OPX; complete `N_MAX_MOVES` derivation; ratify ADR-0002/0010; write `network/MINIMAL_OPX.md`; safety-plane fault-injection per PLAN-V2 §09.
-- **Phase 2:** fake OPX broker double, Layer-4 compiler v0 (+ `validation_token` issuance in `src/safety/`), `ShotResult`/`RunSummary` path, read-only observer dashboard, orchestrator `UNHEALTHY` enforcement from heartbeats.
+- **Phase 0A in the lab (blocking track):** run `tests/hardware/` scripts on the Tower/OPX; complete `N_MAX_MOVES` derivation; ratify ADR-0002/0010; write `network/MINIMAL_OPX.md`; safety-plane fault-injection per PLAN-V2 §09.
+- **Phase 2:** richer fake OPX broker double beyond lifecycle verbs, Layer-4 compiler v0 (+ `validation_token` issuance in `src/safety/`), `ShotResult`/`RunSummary` path, read-only observer dashboard, orchestrator `UNHEALTHY` enforcement from heartbeats. This starts only after the Phase 0A gate is written complete.
 - **Phase 3:** full calibration tables + publication transaction, execution bundles, durable shot-commit protocol (spool + fsync + replay), recovery tests, off-host replica.
 - **Phases 4–6:** modeled devices, Andor adapter + commissioning demo (`v1-dev_non_durable`), SLM remote adapter + `v1-lab` EliteDesk split.
 
 ## Self-review notes
 
-- Coverage vs spec: all seven Phase-1 workstreams (W1-1…W1-7) have tasks; W1-6 (broker shell against real QM SDK) is deliberately reduced to the batch encoder + harness because there is no OPX reachable from dev — the gRPC broker shell joins Phase 2's fake-OPX task where it can be tested. Recorded in MILESTONES deviations.
+- Coverage vs spec: all seven Phase-1 workstreams (W1-1...W1-7) have tasks. W1-6 is split: the hardware-free lifecycle/gRPC shell is covered by `fake_opx` in Task 5; the QM SDK connection and `RtJobResult` path are blocked on OPX access and remain Phase 2/Phase 0A work. The previous conflation of those halves is explicitly avoided.
 - Type consistency: `AdmissionResult`, `Orchestrator.dequeue_for_execution`, proto message names, and FSM enums are used with identical names/signatures across Tasks 8–11.
 - Known simplifications, all flagged inline: insecure gRPC ports until the v1-lab mTLS rollout; compile-validation stub; minimal `calibration_snapshots` table as FK target; `runs.bundle_id` deferred to the Phase 3 migration.

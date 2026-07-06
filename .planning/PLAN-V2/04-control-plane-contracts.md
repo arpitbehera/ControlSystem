@@ -34,27 +34,16 @@ service ManagedDevice {
 State machine each service implements:
 
 ```
-            ┌──────────┐  configure ok   ┌────────────┐
-            │  UNINIT  │ ──────────────► │ CONFIGURED │
-            └──────────┘                  └─────┬──────┘
-                  ▲                              │ arm
-                  │ disarm                       ▼
-                  │                       ┌────────────┐
-                  │                       │   ARMED    │
-                  │                       └─────┬──────┘
-                  │                              │ start
-                  │                              ▼
-                  │                       ┌────────────┐
-                  │  stop / fault         │  RUNNING   │
-                  └──────────────────────┴─────┬──────┘
-                                                │ stop ok
-                                                ▼
-                                         ┌────────────┐
-                                         │  STOPPED   │ → disarm → CONFIGURED
-                                         └────────────┘
+UNINIT --configure ok--> CONFIGURED --arm--> ARMED --start--> RUNNING --stop ok--> STOPPED
+CONFIGURED --disarm--> UNINIT
+ARMED --disarm--> UNINIT
+RUNNING --disarm--> UNINIT     # emergency abort / E-stop / watchdog only
+STOPPED --disarm--> UNINIT
+FAULT --disarm--> UNINIT
+RUNNING --fault--> FAULT
 ```
 
-Faults are surfaced as `StatusEvent.kind == "fault"`; the orchestrator transitions the service to `UNINIT` after a `Disarm`. Idempotent: re-issuing the same verb in the same state is a no-op success. Submitting `idempotency_key` on `Start` deduplicates retries (critique F-15).
+Faults are surfaced as `StatusEvent.kind == "fault"`; `Disarm` always returns a managed device service to `UNINIT`, never `CONFIGURED`, so the next `Arm` requires a fresh `Configure`. The adapter's `on_disarm` hook enforces the descriptor-defined `safe_default` regardless of entry state; the FSM records lifecycle state only. Direct `Disarm` from `RUNNING` is reserved for emergency abort / E-stop / watchdog paths. Graceful user cancel stops at the next shot boundary (`RUNNING → STOPPED`) before disarming. Idempotent: re-issuing the same verb in the same state is a no-op success. Every mutating lifecycle verb carries an `idempotency_key`; `Configure`, `Arm`, and `Start` deduplicate exact request replays before applying the FSM, and reject same-key reuse with a different canonical request hash as `idempotency_key_reused`. `Stop` and `Disarm` are idempotent only by lifecycle state, not by stale key replay; a repeated `Disarm` key must never suppress a valid emergency safe-default hook.
 
 ### Capability shape
 
@@ -239,7 +228,7 @@ service Scheduler {
 }
 ```
 
-Idempotency: every mutating verb takes an `idempotency_key`. The scheduler deduplicates by `(user, key)` for 24 h.
+Idempotency: every mutating verb takes an `idempotency_key`. Payload-bearing lifecycle verbs deduplicate device-locally by `(verb, key, request_hash)`; scheduler mutations deduplicate by `(user, key, request_hash)` for 24 h. Same key scope with a different canonical request hash rejects as `idempotency_key_reused`. `Stop` and `Disarm` are never suppressed by stale key replay.
 
 ## Access control matrix
 
