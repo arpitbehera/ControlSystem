@@ -131,6 +131,7 @@ dev = [
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "ruff" },
+    { name = "types-grpcio" },
     { name = "types-protobuf" },
 ]
 
@@ -153,6 +154,7 @@ dev = [
     { name = "pytest", specifier = ">=8" },
     { name = "pytest-cov", specifier = ">=5" },
     { name = "ruff", specifier = ">=0.4" },
+    { name = "types-grpcio", specifier = ">=1.0.0.20260614" },
     { name = "types-protobuf" },
 ]
 
@@ -677,6 +679,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/7c/f7/68adc395201b20b872d68e975386832e8005ffeacedd43a1d837a32815be/typer-0.26.8.tar.gz", hash = "sha256:c244a6bd558886fe3f8780efb6bdd28bb9aff005a94eedebaa5cb32926fe2f7e", size = 202097, upload-time = "2026-06-26T09:22:45.705Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/80/87/b9fd69c92c6102a066e1b86a35243f53e70bd4c709f2a26d9f4fee4f4dc0/typer-0.26.8-py3-none-any.whl", hash = "sha256:3512ca79ac5c11113414b36e80281b872884477722440691c89d1112e321a49c", size = 122564, upload-time = "2026-06-26T09:22:44.72Z" },
+]
+
+[[package]]
+name = "types-grpcio"
+version = "1.0.0.20260614"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/4f/1c/e299150827a2224fe9ddb59e9f789f0eb8e72e0befc23fd47195024311fa/types_grpcio-1.0.0.20260614.tar.gz", hash = "sha256:e86d1aabb7e7eedae487c3ac10e010a13d5db1fd350e766562053af557366aab", size = 15063, upload-time = "2026-06-14T06:23:33.591Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/33/f5/a8b8ca4d891bc4e835ef758a8fb50c7539c7f45bc0e42fae2b847cbc59b7/types_grpcio-1.0.0.20260614-py3-none-any.whl", hash = "sha256:050472cb4ef329ae8fe20278c62bc0da5b961aad3dd889cc35f6e0c70d368dae", size = 15629, upload-time = "2026-06-14T06:23:32.616Z" },
 ]
 
 [[package]]
