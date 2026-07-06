@@ -13,6 +13,9 @@ dependencies = [
     "numpy>=1.26",
 ]
 
+[project.scripts]
+lab = "dashboards.operator_cli.main:app"
+
 [dependency-groups]
 dev = [
     "grpcio-tools>=1.62",
