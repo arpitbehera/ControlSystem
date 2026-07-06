@@ -1,8 +1,8 @@
 # PRD — AMO Neutral-Atom Lab Control System (v1)
 
-**Source:** `.planning/PLAN-V2/` (15-document architecture set), `CONTEXT.md` glossary, ADR seed list (PLAN-V2 §13).
+**Source:** `.planning/architecture/` (15-document architecture set), `.planning/CONTEXT.md` glossary, ADR seed list (PLAN-V2 §13).
 **Status:** Derived PRD for starting implementation. Where this PRD and PLAN-V2 disagree, PLAN-V2 wins.
-**Companion:** `PLAN.md` — step-by-step implementation plan for the first slice (Phase 0 bootstrap → Pre-Phase-1 software-readiness gate + Phase 0A harness code).
+**Companion:** `.planning/PLAN.md` — step-by-step implementation plan for the first slice (Phase 0 bootstrap → Pre-Phase-1 software-readiness gate + Phase 0A harness code).
 
 ---
 
@@ -32,7 +32,7 @@ Build the six-layer control platform specified in PLAN-V2:
 - **Fake-first, contract-tested.** Every adapter ships after its fake; one parametrized contract-test suite drives fakes and reals through the same code path.
 - **Phase 0A measurement spike** precedes contract freezing: `push_to_input_stream` latency curves, GPUDirect bring-up, `N_MAX_MOVES` derivation, process-discipline study, safety-plane independence tests, NTP drift baseline.
 
-Implementation starts with the Pre-Phase-1 software-readiness slice in `PLAN.md`: repository bootstrap, proto contracts, lifecycle FSM + contract tests, fake camera, fake OPX lifecycle shell, Postgres schema v1, admission validator, orchestrator skeleton, operator CLI, and the Phase 0A hardware-harness code. That slice does not complete PLAN-V2 Phase 1 until Phase 0A's hardware gates pass.
+Implementation starts with the Pre-Phase-1 software-readiness slice in `.planning/PLAN.md`: repository bootstrap, proto contracts, lifecycle FSM + contract tests, fake camera, fake OPX lifecycle shell, Postgres schema v1, admission validator, orchestrator skeleton, operator CLI, and the Phase 0A hardware-harness code. That slice does not complete PLAN-V2 Phase 1 until Phase 0A's hardware gates pass.
 
 ## User Stories
 
@@ -136,6 +136,6 @@ Per PLAN-V2 §00 non-goals and §10:
 
 - **Ordering constraint:** Phase 0A measurements gate ADR-0002/0010 acceptance and the `RearrangementBatchV1` freeze. They confirm ADR-0016 under measured run+compute contention, and may trigger its reversal condition if the GPU-locality premise breaks, but do not gate ADR-0016 acceptance. Software work that doesn't depend on those numbers (proto contracts, lifecycle FSM, fakes, fake OPX lifecycle shell, schema v1, admission, orchestrator skeleton) can proceed as a Pre-Phase-1 readiness slice, but PLAN-V2 Phase 1 is not complete until W0A-1...W0A-5 are written complete. The provisional batch encoder exists to feed representative Phase 0A payloads; it does not freeze `N_MAX_MOVES` or `BATCH_WORDS`.
 - **Deployment posture:** everything in the starting slice runs co-located on the Tower (`v1-dev`), but the Admission Validator ↔ orchestrator boundary is a gRPC seam from day one so the `v1-lab` EliteDesk split is a deployment move, not a redesign.
-- **ADR discipline:** the seed list in PLAN-V2 §13 becomes real files under `docs/adr/` as decisions are ratified; ADR-0001 and ADR-0016 are already Accepted and should be committed as files during repo bootstrap.
-- **Repository layout** follows PLAN-V2 §10 (`proto/`, `schema/`, `src/`, `tests/`, `network/`, `ops/`, `docs/adr/`).
+- **ADR discipline:** the seed list in PLAN-V2 §13 becomes real files under `.planning/adr/` as decisions are ratified; ADR-0001 and ADR-0016 are already Accepted and should be committed as files during repo bootstrap.
+- **Repository layout** follows PLAN-V2 §10 (`proto/`, `schema/`, `src/`, `tests/`, `network/`, `ops/`, `.planning/adr/`).
 - **Source-of-truth pointers:** `.planning/REQUIREMENTS.md` (PLAT-01…HW-02), `.planning/ROADMAP.md`, and the research inputs under `.planning/research-inputs/` remain authoritative background; this PRD is their operational distillation.

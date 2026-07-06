@@ -36,10 +36,10 @@ Total: ~12–18 months for v1; v2 features (REMOTE-01, UI-02, DATA-01, DEV-01) f
 
 **Deliverables** (ADR numbers match the §13 seed list):
 
-- `docs/adr/0001-execution-authority-and-broker-placement.md` — ratifies (or revisits) ADR-0001 (Tower = execution authority + broker; EliteDesk = validate + store) against the measured GPUDirect path.
-- `docs/adr/0002-rearrangement-batch-v1.md` — locks ADR-0002 wire-message shape based on measurement.
-- `docs/adr/0010-broker-process-discipline.md` — locks ADR-0010 priority + affinity from W0A-3.
-- `docs/adr/0016-gpu-mutex-locality.md` — confirms ADR-0016 (Tower-local mutex) under the measured run+compute contention.
+- `.planning/adr/0001-execution-authority-and-broker-placement.md` — ratifies (or revisits) ADR-0001 (Tower = execution authority + broker; EliteDesk = validate + store) against the measured GPUDirect path.
+- `.planning/adr/0002-rearrangement-batch-v1.md` — locks ADR-0002 wire-message shape based on measurement.
+- `.planning/adr/0010-broker-process-discipline.md` — locks ADR-0010 priority + affinity from W0A-3.
+- `.planning/adr/0016-gpu-mutex-locality.md` — confirms ADR-0016 (Tower-local mutex) under the measured run+compute contention.
 - `network/MINIMAL_OPX.md` — minimal cold-bring-up procedure (per research design doc §3.12.6).
 - `tests/hardware/` — every Phase 0A test reified as a re-runnable script.
 
@@ -175,11 +175,11 @@ Every milestone is a *real* stop. The next phase does not begin until:
 
 1. The prior phase's exit gate is met in writing in `.planning/MILESTONES.md`.
 2. Risks raised during the phase are added to `11-risks-bottlenecks-mitigations.md` with measurement plans.
-3. ADRs for any decision made during the phase are committed to `docs/adr/`.
+3. ADRs for any decision made during the phase are committed to `.planning/adr/`.
 
 ## Cross-phase activities
 
-- **ADR cadence:** every load-bearing decision becomes an ADR in `docs/adr/NNNN-name.md`. See §13.
+- **ADR cadence:** every load-bearing decision becomes an ADR in `.planning/adr/NNNN-name.md`. See §13.
 - **Quarterly drills:** restore-from-backup, switch-config restore, broker process replacement, off-host replica failover.
 - **Annual review:** bus-factor per layer; renew pair-coverage assignments.
 - **Per-release:** schema-migration test, hardware-smoke re-run, dashboard regression.

@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.14 (`>=3.14,<3.15`), gRPC + proto3 (`grpcio`, `grpcio-tools`), PostgreSQL 16 + SQLAlchemy 2.x + Alembic + psycopg3, pytest + pytest-cov, ruff + black + mypy --strict, typer CLI, uv for lockfile.
 
-**Spec:** `.planning/PLAN-V2/` (authoritative) and `PRD.md` (distillation). Where this plan simplifies, PLAN-V2 wins.
+**Spec:** `.planning/architecture/` (authoritative) and `.planning/PRD.md` (distillation). Where this plan simplifies, PLAN-V2 wins.
 
 **Phase naming reconciliation:** PLAN-V2 §00 marks the long-lived control contracts as the things to preserve, while PLAN-V2 §12 makes Phase 0A a safety- and measurement-motivated prerequisite before entering Phase 1. This plan resolves that tension by producing software readiness only: control-plane contracts can be reviewed and exercised, but RT contract freezing, `N_MAX_MOVES`, the latency budget, process discipline, and safety-plane independence remain blocked on W0A-1...W0A-5. No PLAN-V2 gate is weakened.
 
@@ -37,8 +37,8 @@
 - Create: `pyproject.toml`, `.gitignore` (extend), `README.md`
 - Create: `src/orchestrator/__init__.py`, `src/compiler/__init__.py`, `src/descriptor/__init__.py`, `src/calibration/__init__.py`, `src/broker/__init__.py`, `src/device_servers/__init__.py`, `src/device_servers/_base/__init__.py`, `src/safety/__init__.py`, `src/dashboards/__init__.py`, `src/proto_gen/__init__.py`
 - Create: `tests/__init__.py`, `tests/unit/__init__.py`, `tests/contract/__init__.py`, `tests/integration/__init__.py`, `tests/fault_injection/__init__.py`, `tests/hardware/README.md`
-- Create: `proto/.gitkeep`, `schema/.gitkeep`, `network/.gitkeep`, `ops/runbooks/.gitkeep`, `docs/adr/.gitkeep`
-- Create: `docs/adr/0001-execution-authority-and-broker-placement.md`, `docs/adr/0016-gpu-mutex-locality.md`, `docs/adr/0017-lifecycle-disarm-returns-uninit.md`
+- Create: `proto/.gitkeep`, `schema/.gitkeep`, `network/.gitkeep`, `ops/runbooks/.gitkeep`, `.planning/adr/.gitkeep`
+- Create: `.planning/adr/0001-execution-authority-and-broker-placement.md`, `.planning/adr/0016-gpu-mutex-locality.md`, `.planning/adr/0017-lifecycle-disarm-returns-uninit.md`
 - Create: `.github/workflows/ci.yml`
 
 **Interfaces:**
@@ -131,9 +131,9 @@ Each script is re-runnable and writes JSON results next to itself.
 
 - [ ] **Step 3: Write the three ADRs**
 
-Copy the full **ADR-0001** and **ADR-0016** entries verbatim from `.planning/PLAN-V2/13-architectural-decisions.md` into `docs/adr/0001-execution-authority-and-broker-placement.md` and `docs/adr/0016-gpu-mutex-locality.md`, using the ADR template header from the same file (`Status: Accepted`).
+Copy the full **ADR-0001** and **ADR-0016** entries verbatim from `.planning/architecture/13-architectural-decisions.md` into `.planning/adr/0001-execution-authority-and-broker-placement.md` and `.planning/adr/0016-gpu-mutex-locality.md`, using the ADR template header from the same file (`Status: Accepted`).
 
-Create `docs/adr/0017-lifecycle-disarm-returns-uninit.md` from the lifecycle decision resolved during planning:
+Create `.planning/adr/0017-lifecycle-disarm-returns-uninit.md` from the lifecycle decision resolved during planning:
 
 ```markdown
 # ADR-0017: Lifecycle Disarm Returns to UNINIT

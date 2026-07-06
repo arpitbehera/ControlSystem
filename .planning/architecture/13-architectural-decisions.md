@@ -1,6 +1,6 @@
 # 13 — Architectural Decision Records
 
-Each ADR captures one load-bearing decision with its alternatives, evidence, and reversal condition. ADRs are the durable record per critique F-19. Final per-decision ADR files live under `docs/adr/NNNN-name.md` once Phase 0A starts; this document is the seed list.
+Each ADR captures one load-bearing decision with its alternatives, evidence, and reversal condition. ADRs are the durable record per critique F-19. Final per-decision ADR files live under `.planning/adr/NNNN-name.md` once Phase 0A starts; this document is the seed list.
 
 ADR template:
 
@@ -202,5 +202,5 @@ ADR template:
 
 - Each ADR has a single primary author + at least one reviewer from a different role.
 - Proposed → Accepted only after the gating phase / measurement is complete.
-- Superseded ADRs are kept in `docs/adr/` for historical reference.
+- Superseded ADRs are kept in `.planning/adr/` for historical reference.
 - A quarterly review walks the ADR list and flags any whose reversal conditions have started to apply.

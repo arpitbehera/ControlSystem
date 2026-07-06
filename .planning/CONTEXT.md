@@ -1,6 +1,6 @@
 # CONTEXT — Glossary
 
-Canonical domain language for the neutral-atom tweezer control system. Glossary only — no implementation detail. See `.planning/PLAN-V2/` for architecture.
+Canonical domain language for the neutral-atom tweezer control system. Glossary only — no implementation detail. See `.planning/architecture/` for architecture.
 
 ## Terms
 
