@@ -1,0 +1,48 @@
+syntax = "proto3";
+package controlsystem.run;
+
+message RunRequest {
+  string user = 1;
+  string template_name = 2;
+  string parameters_json = 3;             // JSON object: scanned + fixed params
+  repeated string required_calibration = 4;
+  optional int64 requested_descriptor_id = 5;  // replay/debug/admin only
+  string idempotency_key = 6;
+}
+
+message AcceptedJob {
+  string job_uuid = 1;
+  RunRequest request = 2;
+  int64 descriptor_id = 3;                // pinned at admission
+  int64 snapshot_id = 4;                  // pinned at admission
+  string submitted_at = 5;                // RFC3339
+  bytes request_hash = 6;                 // sha256 over canonical request payload
+}
+
+message Rejection { string code = 1; string reason = 2; }
+
+message EnqueueResponse {
+  oneof outcome { AcceptedJob accepted = 1; Rejection rejected = 2; }
+}
+
+message CancelRequest {
+  string target = 1;                      // job_uuid or run_uuid
+  string target_kind = 2;                 // "job" | "run"
+  string requested_by = 3;
+  string reason = 4;
+  string idempotency_key = 5;
+}
+message CancelResponse { bool ok = 1; string state = 2; string error = 3; }
+
+message RunSummary {
+  string run_uuid = 1;
+  string status = 2;                      // completed|failed|aborted|unsafe
+  uint32 shot_count = 3;
+  uint32 shots_ok = 4;
+  double duration_s = 5;
+  int64 snapshot_id = 6;
+  int64 descriptor_id = 7;
+  int64 execution_bundle_id = 8;
+  string durability_tier = 9;             // v1-dev_non_durable | v1-lab_durable
+  repeated string notes = 10;
+}

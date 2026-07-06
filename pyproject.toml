@@ -52,6 +52,10 @@ ignore_errors = true
 [tool.ruff]
 line-length = 100
 src = ["src", "tests"]
+extend-exclude = ["src/proto_gen"]
+
+[tool.black]
+extend-exclude = "/src/proto_gen/"
 
 [tool.coverage.run]
 source = ["src/orchestrator", "src/compiler", "src/device_servers", "src/broker"]

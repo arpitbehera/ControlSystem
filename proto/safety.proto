@@ -1,0 +1,8 @@
+syntax = "proto3";
+package controlsystem.safety;
+
+message SafetyState {
+  bool safe = 1;
+  repeated string tripped = 2;   // names of tripped interlocks/watchdogs
+  string detail = 3;
+}

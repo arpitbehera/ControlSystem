@@ -1,0 +1,69 @@
+syntax = "proto3";
+package controlsystem.lifecycle;
+
+message Empty {}
+
+message HealthRequest {}
+message HealthResponse {
+  string service_id = 1;
+  string state = 2;          // UNINIT|CONFIGURED|ARMED|RUNNING|STOPPED|FAULT
+  bool healthy = 3;
+  string detail = 4;
+}
+
+message TimingHint { string name = 1; string value = 2; }
+
+message CameraCapabilities {
+  uint32 sensor_width = 1;
+  uint32 sensor_height = 2;
+  repeated string trigger_modes = 3;
+}
+message SlmCapabilities { uint32 width = 1; uint32 height = 2; double refresh_ms = 3; }
+message OpxCapabilities {
+  string qop_version = 1;
+  repeated string analog_outputs = 2;
+  repeated string digital_outputs = 3;
+}
+
+message Capabilities {
+  string service_id = 1;
+  string firmware = 2;
+  string driver_version = 3;
+  repeated TimingHint timing = 4;
+  oneof specific {
+    CameraCapabilities camera = 10;
+    SlmCapabilities slm = 11;
+    OpxCapabilities opx = 12;
+  }
+}
+
+message ConfigureRequest { string config_yaml = 1; string idempotency_key = 2; }
+message ConfigureResponse { bool ok = 1; string error = 2; }
+message ArmRequest { string run_uuid = 1; string idempotency_key = 2; }
+message ArmResponse { bool ok = 1; string error = 2; }
+message StartRequest { string run_uuid = 1; string idempotency_key = 2; }
+message StartResponse { bool ok = 1; string error = 2; }
+message StopRequest { string idempotency_key = 1; }
+message StopResponse { bool ok = 1; string error = 2; }
+message DisarmRequest { string idempotency_key = 1; }
+message DisarmResponse { bool ok = 1; string error = 2; }
+
+message StatusRequest {}
+message StatusEvent {
+  string service_id = 1;
+  string state = 2;
+  string kind = 3;           // "transition" | "heartbeat" | "fault"
+  string detail = 4;
+  int64 wall_ns = 5;
+}
+
+service ManagedDevice {
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc Capabilities(Empty) returns (controlsystem.lifecycle.Capabilities);
+  rpc Configure(ConfigureRequest) returns (ConfigureResponse);
+  rpc Arm(ArmRequest) returns (ArmResponse);
+  rpc Start(StartRequest) returns (StartResponse);
+  rpc Stop(StopRequest) returns (StopResponse);
+  rpc Status(StatusRequest) returns (stream StatusEvent);
+  rpc Disarm(DisarmRequest) returns (DisarmResponse);
+}

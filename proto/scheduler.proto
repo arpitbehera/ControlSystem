@@ -1,0 +1,15 @@
+syntax = "proto3";
+package controlsystem.scheduler;
+import "run_model.proto";
+import "lifecycle.proto";
+
+message ListRunsRequest { uint32 limit = 1; }
+message RunRow { string run_uuid = 1; string state = 2; string template_name = 3; string user = 4; }
+message ListRunsResponse { repeated RunRow runs = 1; }
+
+service Scheduler {
+  rpc Enqueue(controlsystem.run.RunRequest) returns (controlsystem.run.EnqueueResponse);
+  rpc Cancel(controlsystem.run.CancelRequest) returns (controlsystem.run.CancelResponse);
+  rpc Status(controlsystem.lifecycle.StatusRequest) returns (stream controlsystem.lifecycle.StatusEvent);
+  rpc ListRuns(ListRunsRequest) returns (ListRunsResponse);
+}
