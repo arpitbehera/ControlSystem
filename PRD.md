@@ -100,7 +100,7 @@ Decisions below are copied from PLAN-V2 (docs 00–13) except where the readines
 - Independent safety plane = hardware interlocks (L0/L0.5) + QUA-side bounds and PPU watchdog (L1/L1.5). Software layers (broker watchdog, scheduler interlocks, operator E-stop) are defense-in-depth only (ADR-0012). `validation_token` = compile-time HMAC attestation from Layer 4 with short expiry; broker refuses submissions without a valid one; it is never the safety mechanism.
 
 **Stack & operations**
-- Python 3.11+ for all non-RT code; QUA DSL (compiler-emitted only, never user-authored) for RT; CUDA C++ via cupy for kernels; TypeScript/React for the read-only dashboard; typer/click CLI.
+- Python 3.14 (`>=3.14,<3.15`) for all non-RT code, selected as the latest supported CPython series allowed by `qm-qua` (`>=3.10,<3.15`); QUA DSL (compiler-emitted only, never user-authored) for RT; CUDA C++ via cupy for kernels; TypeScript/React for the read-only dashboard; typer/click CLI.
 - gRPC + proto3 + mTLS on VLAN 10 (ADR-0009); QM SDK on VLAN 50; shared-memory queue broker ↔ data-lake writer.
 - One process per device-class, wrapped as Windows services via `nssm` (ADR-0011); broker default `HIGH_PRIORITY_CLASS`, pinned cores, priority raised only on measured benefit (ADR-0010).
 - `src/` layout modular monolith, single repo; `uv` lockfile committed and embedded in execution bundles; semver.

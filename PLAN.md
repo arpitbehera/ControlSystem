@@ -6,7 +6,7 @@
 
 **Architecture:** Modular monolith, `src/` layout per PLAN-V2 §10. Tower is run-execution authority; EliteDesk admission is a separate gRPC seam from day one even though `v1-dev` co-locates everything. Fake-first: every service implements the eight-verb lifecycle contract and passes one shared contract-test suite before any real hardware code exists. Phase 0A harness scripts are written now, executed later in the lab.
 
-**Tech Stack:** Python 3.11+, gRPC + proto3 (`grpcio`, `grpcio-tools`), PostgreSQL 16 + SQLAlchemy 2.x + Alembic + psycopg3, pytest + pytest-cov, ruff + black + mypy --strict, typer CLI, uv for lockfile.
+**Tech Stack:** Python 3.14 (`>=3.14,<3.15`), gRPC + proto3 (`grpcio`, `grpcio-tools`), PostgreSQL 16 + SQLAlchemy 2.x + Alembic + psycopg3, pytest + pytest-cov, ruff + black + mypy --strict, typer CLI, uv for lockfile.
 
 **Spec:** `.planning/PLAN-V2/` (authoritative) and `PRD.md` (distillation). Where this plan simplifies, PLAN-V2 wins.
 
@@ -14,7 +14,7 @@
 
 ## Global Constraints
 
-- Python `>= 3.11`; all runtime code must work on Windows (no POSIX-only APIs on runtime paths; `pathlib` everywhere; dev on WSL/Linux is fine).
+- Python `>=3.14,<3.15`; choose the latest supported CPython series allowed by `qm-qua` (`>=3.10,<3.15`) for the longest available support horizon. All runtime code must work on Windows (no POSIX-only APIs on runtime paths; `pathlib` everywhere; dev on WSL/Linux is fine).
 - Python is **never** in the hard-timing loop; all timed actions are QUA on the OPX+ PPU (PLAN-V2 §06).
 - Lifecycle verbs are exactly `health, capabilities, configure, arm, start, stop, status, disarm` — additive evolution only, never renamed (PLAN-V2 §00 freeze list).
 - Run model type names are exactly `RunRequest`, `AcceptedJob`, `RunPlan`, `ShotResult`, `RunSummary` (PLAN-V2 §04).
@@ -52,7 +52,7 @@
 name = "controlsystem"
 version = "0.1.0"
 description = "AMO neutral-atom lab control system (PLAN-V2 v1)"
-requires-python = ">=3.11"
+requires-python = ">=3.14,<3.15"
 dependencies = [
     "grpcio>=1.62",
     "protobuf>=4.25",
