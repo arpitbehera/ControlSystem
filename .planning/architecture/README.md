@@ -1,4 +1,4 @@
-# PLAN-V2: AMO Neutral-Atom Lab Control System
+# architecture: AMO Neutral-Atom Lab Control System
 
 **Status:** Draft architecture + phased implementation plan
 **Date:** 2026-05-28

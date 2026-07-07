@@ -68,7 +68,7 @@ Data produced before the [[v1-lab]] durability split. It may be used to validate
 The routine scientific-run deployment. Tower keeps execution authority; EliteDesk hosts admission, pending jobs, metadata, calibration registry, and replica duties.
 
 ### Pre-Phase-1 software readiness
-A planning status meaning the software-side control-plane slice is ready for review and dry-run validation, but the lab has **not** passed the Phase 0A measurement and safety gates. It is not equivalent to PLAN-V2 Phase 1 completion. Phase 1 remains blocked until the hardware evidence for the rearrangement RT contract, latency budget, process discipline, safety-plane independence, and clock-drift baseline is recorded.
+A planning status meaning the software-side control-plane slice is ready for review and dry-run validation, but the lab has **not** passed the Phase 0A measurement and safety gates. It is not equivalent to architecture Phase 1 completion. Phase 1 remains blocked until the hardware evidence for the rearrangement RT contract, latency budget, process discipline, safety-plane independence, and clock-drift baseline is recorded.
 
 ### Device descriptor
 An immutable description of the controllable physical system: channels, geometry, timing, bounds, and safety-relevant limits. Accepted jobs pin one descriptor. Normal submissions use the active descriptor at submission time; explicit descriptor selection is reserved for replay/debug/admin flows.

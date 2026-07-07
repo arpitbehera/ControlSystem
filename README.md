@@ -1,7 +1,7 @@
 # ControlSystem
 
 AMO neutral-atom lab control-system skeleton. Current state is Pre-Phase-1
-software readiness for `v1-dev` co-located bring-up, not PLAN-V2 Phase 1
+software readiness for `v1-dev` co-located bring-up, not architecture Phase 1
 completion.
 
 ## Quickstart

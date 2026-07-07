@@ -1,7 +1,7 @@
 # PRD — AMO Neutral-Atom Lab Control System (v1)
 
-**Source:** `.planning/architecture/` (15-document architecture set), `.planning/CONTEXT.md` glossary, ADR seed list (PLAN-V2 §13).
-**Status:** Derived PRD for starting implementation. Where this PRD and PLAN-V2 disagree, PLAN-V2 wins.
+**Source:** `.planning/architecture/` (15-document architecture set), `.planning/CONTEXT.md` glossary, ADR seed list (architecture §13).
+**Status:** Derived PRD for starting implementation. Where this PRD and architecture disagree, architecture wins.
 **Companion:** `.planning/PLAN.md` — step-by-step implementation plan for the first slice (Phase 0 bootstrap → Pre-Phase-1 software-readiness gate + Phase 0A harness code).
 
 ---
@@ -20,7 +20,7 @@ The people running the experiment face five problems:
 
 ## Solution
 
-Build the six-layer control platform specified in PLAN-V2:
+Build the six-layer control platform specified in architecture:
 
 - **Tower (`PC1`) is the run-execution authority** — orchestrator (scheduler, run FSM, calibration-DAG runner), compiler, and broker (OPX client, BitFlow capture, GPU pipeline, raw spool) all live there, keeping the rearrangement loop inside one PCIe topology. Only the Tower advances run state (ADR-0001).
 - **EliteDesk is Admission Validator/Submitter + pending job queue + durable store** (Postgres metadata DB, calibration registry, off-host raw replica). It cannot advance run state. `v1-dev` co-locates all roles on the Tower for bring-up; `v1-lab` splits them before routine scientific operation.
@@ -32,7 +32,7 @@ Build the six-layer control platform specified in PLAN-V2:
 - **Fake-first, contract-tested.** Every adapter ships after its fake; one parametrized contract-test suite drives fakes and reals through the same code path.
 - **Phase 0A measurement spike** precedes contract freezing: `push_to_input_stream` latency curves, GPUDirect bring-up, `N_MAX_MOVES` derivation, process-discipline study, safety-plane independence tests, NTP drift baseline.
 
-Implementation starts with the Pre-Phase-1 software-readiness slice in `.planning/PLAN.md`: repository bootstrap, proto contracts, lifecycle FSM + contract tests, fake camera, fake OPX lifecycle shell, Postgres schema v1, admission validator, orchestrator skeleton, operator CLI, and the Phase 0A hardware-harness code. That slice does not complete PLAN-V2 Phase 1 until Phase 0A's hardware gates pass.
+Implementation starts with the Pre-Phase-1 software-readiness slice in `.planning/PLAN.md`: repository bootstrap, proto contracts, lifecycle FSM + contract tests, fake camera, fake OPX lifecycle shell, Postgres schema v1, admission validator, orchestrator skeleton, operator CLI, and the Phase 0A hardware-harness code. That slice does not complete architecture Phase 1 until Phase 0A's hardware gates pass.
 
 ## User Stories
 
@@ -73,7 +73,7 @@ Implementation starts with the Pre-Phase-1 software-readiness slice in `.plannin
 
 ## Implementation Decisions
 
-Decisions below are copied from PLAN-V2 (docs 00–13) except where the readiness plan explicitly marks a provisional correction for Phase 0A validation; the ADR IDs are the authority once ratified.
+Decisions below are copied from architecture (docs 00–13) except where the readiness plan explicitly marks a provisional correction for Phase 0A validation; the ADR IDs are the authority once ratified.
 
 **Topology & authority**
 - Tower = run-execution authority: orchestrator + compiler + broker; only the Tower advances run state. EliteDesk = admission validation + pending queue + durable store; deterministic admission so it can run co-located (`v1-dev`) or split (`v1-lab`) without redesign (ADR-0001).
@@ -83,7 +83,7 @@ Decisions below are copied from PLAN-V2 (docs 00–13) except where the readines
 **Contracts (5+ year freezes)**
 - Lifecycle verbs: `health, capabilities, configure, arm, start, stop, status, disarm`; verbs may be added, never silently changed.
 - Managed-device `Disarm` always invokes adapter safe-default handling and returns to `UNINIT`; the next `Arm` requires fresh `Configure`. Direct `RUNNING → Disarm` is emergency abort / E-stop / watchdog only; graceful cancel uses shot-boundary `Stop → STOPPED → Disarm` (ADR-0017).
-- Run model: `RunRequest`, `AcceptedJob`, `RunPlan`, `ShotResult`, `RunSummary`; run FSM and shot FSM as specified in PLAN-V2 §04, with cancel carrying both request and effective timestamps.
+- Run model: `RunRequest`, `AcceptedJob`, `RunPlan`, `ShotResult`, `RunSummary`; run FSM and shot FSM as specified in architecture §04, with cancel carrying both request and effective timestamps.
 - Provenance chain: `code_commit_sha + descriptor_id + snapshot_id + execution_bundle_id → run_uuid → shot_uuid`; same IDs in DB rows and HDF5 attributes.
 - `RearrangementBatchV1`: fixed-width homogeneous QUA `int` vector; the readiness plan uses a provisional signed-QUA-safe header (16 header words, 64-bit fields split into three 31-bit chunks) + 6 words/move; PPU validates version, sequence, hashes, deadline, bounds; missing/late/malformed → safe state; valid partial batches play best-effort (ADR-0002, provisional until Phase 0A).
 - `N_MAX_MOVES = 1024` is a placeholder; Phase 0A must derive it from descriptor geometry + assignment policy and prove the OPX/QOP stack accepts the resulting declaration.
@@ -117,11 +117,11 @@ Decisions below are copied from PLAN-V2 (docs 00–13) except where the readines
 - **Fault-injection tests** (network faults via toxiproxy-equivalent, process kills, dropped payloads, malformed batches) assert the documented failure outcome, not mere survival.
 - **Hardware smoke tests** live in `tests/hardware/`, are excluded from CI, run manually at bring-up, and double as the Phase 0A measurement harness; each Phase 0A test is a re-runnable script.
 - **Gates:** `pytest-cov` ≥ 80% on orchestrator, device servers, compiler, and the broker's pure-logic paths; `ruff` + `black` + `mypy --strict` on orchestrator, compiler, contracts, and broker. CI: lint + unit + contract + integration + `alembic upgrade head` on a throwaway DB, per PR.
-- **Prior art:** none in-repo (greenfield); the labscript/ARTIQ contract-test pattern cited in PLAN-V2 §10 is the reference shape.
+- **Prior art:** none in-repo (greenfield); the labscript/ARTIQ contract-test pattern cited in architecture §10 is the reference shape.
 
 ## Out of Scope
 
-Per PLAN-V2 §00 non-goals and §10:
+Per architecture §00 non-goals and §10:
 
 - Mid-shot resume after device failure (recovery is shot-boundary only in v1).
 - Routing raw image streams through the orchestrator (bulk stays local).
@@ -134,8 +134,8 @@ Per PLAN-V2 §00 non-goals and §10:
 
 ## Further Notes
 
-- **Ordering constraint:** Phase 0A measurements gate ADR-0002/0010 acceptance and the `RearrangementBatchV1` freeze. They confirm ADR-0016 under measured run+compute contention, and may trigger its reversal condition if the GPU-locality premise breaks, but do not gate ADR-0016 acceptance. Software work that doesn't depend on those numbers (proto contracts, lifecycle FSM, fakes, fake OPX lifecycle shell, schema v1, admission, orchestrator skeleton) can proceed as a Pre-Phase-1 readiness slice, but PLAN-V2 Phase 1 is not complete until W0A-1...W0A-5 are written complete. The provisional batch encoder exists to feed representative Phase 0A payloads; it does not freeze `N_MAX_MOVES` or `BATCH_WORDS`.
+- **Ordering constraint:** Phase 0A measurements gate ADR-0002/0010 acceptance and the `RearrangementBatchV1` freeze. They confirm ADR-0016 under measured run+compute contention, and may trigger its reversal condition if the GPU-locality premise breaks, but do not gate ADR-0016 acceptance. Software work that doesn't depend on those numbers (proto contracts, lifecycle FSM, fakes, fake OPX lifecycle shell, schema v1, admission, orchestrator skeleton) can proceed as a Pre-Phase-1 readiness slice, but architecture Phase 1 is not complete until W0A-1...W0A-5 are written complete. The provisional batch encoder exists to feed representative Phase 0A payloads; it does not freeze `N_MAX_MOVES` or `BATCH_WORDS`.
 - **Deployment posture:** everything in the starting slice runs co-located on the Tower (`v1-dev`), but the Admission Validator ↔ orchestrator boundary is a gRPC seam from day one so the `v1-lab` EliteDesk split is a deployment move, not a redesign.
-- **ADR discipline:** the seed list in PLAN-V2 §13 becomes real files under `.planning/adr/` as decisions are ratified; ADR-0001 and ADR-0016 are already Accepted and should be committed as files during repo bootstrap.
-- **Repository layout** follows PLAN-V2 §10 (`proto/`, `schema/`, `src/`, `tests/`, `network/`, `ops/`, `.planning/adr/`).
+- **ADR discipline:** the seed list in architecture §13 becomes real files under `.planning/adr/` as decisions are ratified; ADR-0001 and ADR-0016 are already Accepted and should be committed as files during repo bootstrap.
+- **Repository layout** follows architecture §10 (`proto/`, `schema/`, `src/`, `tests/`, `network/`, `ops/`, `.planning/adr/`).
 - **Source-of-truth pointers:** `.planning/REQUIREMENTS.md` (PLAT-01…HW-02), `.planning/ROADMAP.md`, and the research inputs under `.planning/research-inputs/` remain authoritative background; this PRD is their operational distillation.

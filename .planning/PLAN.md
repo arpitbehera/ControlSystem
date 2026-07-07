@@ -2,30 +2,30 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Stand the repository up from empty to a **Pre-Phase-1 software-readiness gate**: the control-plane implementation can satisfy the software-side Phase 1 evidence (contracts, lifecycle FSM, contract tests, fake camera, fake OPX lifecycle shell, Postgres schema v1, admission validator, orchestrator skeleton, operator CLI) and the Phase 0A hardware-measurement harness code exists. This does **not** satisfy PLAN-V2 Phase 1 until Phase 0A's hardware gates have passed.
+**Goal:** Stand the repository up from empty to a **Pre-Phase-1 software-readiness gate**: the control-plane implementation can satisfy the software-side Phase 1 evidence (contracts, lifecycle FSM, contract tests, fake camera, fake OPX lifecycle shell, Postgres schema v1, admission validator, orchestrator skeleton, operator CLI) and the Phase 0A hardware-measurement harness code exists. This does **not** satisfy architecture Phase 1 until Phase 0A's hardware gates have passed.
 
-**Architecture:** Modular monolith, `src/` layout per PLAN-V2 §10. Tower is run-execution authority; EliteDesk admission is a separate gRPC seam from day one even though `v1-dev` co-locates everything. Fake-first: every service implements the eight-verb lifecycle contract and passes one shared contract-test suite before any real hardware code exists. Phase 0A harness scripts are written now, executed later in the lab.
+**Architecture:** Modular monolith, `src/` layout per architecture §10. Tower is run-execution authority; EliteDesk admission is a separate gRPC seam from day one even though `v1-dev` co-locates everything. Fake-first: every service implements the eight-verb lifecycle contract and passes one shared contract-test suite before any real hardware code exists. Phase 0A harness scripts are written now, executed later in the lab.
 
 **Tech Stack:** Python 3.14 (`>=3.14,<3.15`), gRPC + proto3 (`grpcio`, `grpcio-tools`), PostgreSQL 16 + SQLAlchemy 2.x + Alembic + psycopg3, pytest + pytest-cov, ruff + black + mypy --strict, typer CLI, uv for lockfile.
 
-**Spec:** `.planning/architecture/` (authoritative) and `.planning/PRD.md` (distillation). Where this plan simplifies, PLAN-V2 wins.
+**Spec:** `.planning/architecture/` (authoritative) and `.planning/PRD.md` (distillation). Where this plan simplifies, architecture wins.
 
-**Phase naming reconciliation:** PLAN-V2 §00 marks the long-lived control contracts as the things to preserve, while PLAN-V2 §12 makes Phase 0A a safety- and measurement-motivated prerequisite before entering Phase 1. This plan resolves that tension by producing software readiness only: control-plane contracts can be reviewed and exercised, but RT contract freezing, `N_MAX_MOVES`, the latency budget, process discipline, and safety-plane independence remain blocked on W0A-1...W0A-5. No PLAN-V2 gate is weakened.
+**Phase naming reconciliation:** architecture §00 marks the long-lived control contracts as the things to preserve, while architecture §12 makes Phase 0A a safety- and measurement-motivated prerequisite before entering Phase 1. This plan resolves that tension by producing software readiness only: control-plane contracts can be reviewed and exercised, but RT contract freezing, `N_MAX_MOVES`, the latency budget, process discipline, and safety-plane independence remain blocked on W0A-1...W0A-5. No architecture gate is weakened.
 
 ## Global Constraints
 
 - Python `>=3.14,<3.15`; choose the latest supported CPython series allowed by `qm-qua` (`>=3.10,<3.15`) for the longest available support horizon. All runtime code must work on Windows (no POSIX-only APIs on runtime paths; `pathlib` everywhere; dev on WSL/Linux is fine).
-- Python is **never** in the hard-timing loop; all timed actions are QUA on the OPX+ PPU (PLAN-V2 §06).
-- Lifecycle verbs are exactly `health, capabilities, configure, arm, start, stop, status, disarm` — additive evolution only, never renamed (PLAN-V2 §00 freeze list).
-- Run model type names are exactly `RunRequest`, `AcceptedJob`, `RunPlan`, `ShotResult`, `RunSummary` (PLAN-V2 §04).
+- Python is **never** in the hard-timing loop; all timed actions are QUA on the OPX+ PPU (architecture §06).
+- Lifecycle verbs are exactly `health, capabilities, configure, arm, start, stop, status, disarm` — additive evolution only, never renamed (architecture §00 freeze list).
+- Run model type names are exactly `RunRequest`, `AcceptedJob`, `RunPlan`, `ShotResult`, `RunSummary` (architecture §04).
 - DB column names and HDF5 attribute names are frozen at v1 — additive only, renaming forbidden (risk B14).
-- `durability_tier` values are exactly `v1-dev_non_durable` and `v1-lab_durable` (PLAN-V2 §04/§05).
+- `durability_tier` values are exactly `v1-dev_non_durable` and `v1-lab_durable` (architecture §04/§05).
 - Immutable tables (`device_descriptors`, `calibration_snapshots`) never get `valid_until` or UPDATEs; currency lives only in append-only `*_activations` logs (ADR-0003).
-- `mypy --strict`, `ruff`, `black` on `src/orchestrator/`, `src/compiler/`, `src/device_servers/`, `src/broker/`, contracts; coverage gate 80% on those packages (PLAN-V2 §10).
+- `mypy --strict`, `ruff`, `black` on `src/orchestrator/`, `src/compiler/`, `src/device_servers/`, `src/broker/`, contracts; coverage gate 80% on those packages (architecture §10).
 - Every mutating verb takes an `idempotency_key`; payload-bearing lifecycle verbs dedup device-locally by `(verb, key, request_hash)`, while scheduler/admission mutations dedup by `(user, key, request_hash)`. Key reuse in the same scope with a different canonical request hash is a typed rejection (`idempotency_key_reused`), never silent reuse. `Stop` and `Disarm` are state-idempotent only; stale keys must never suppress `on_disarm`.
 - Commit after every green test cycle; Conventional Commits format.
 
-**Deviation resolved in ADR-0017:** PLAN-V2 §04's FSM diagram showed `STOPPED → disarm → CONFIGURED`, while the §04 prose and risk B13 say `Disarm` returns the service to `UNINIT` and forces re-`Configure` before the next `Arm`. This plan implements the canonical semantics: `disarm` from any of `CONFIGURED / ARMED / RUNNING / STOPPED / FAULT` → `UNINIT`; idempotent no-op at `UNINIT`. Direct `RUNNING → disarm` is emergency abort / E-stop / watchdog only; graceful cancel uses shot-boundary `stop → STOPPED → disarm`. The adapter's `on_disarm` hook, not the FSM, enforces descriptor-defined `safe_default` from every entry state. No driver-cached state survives a disarm.
+**Deviation resolved in ADR-0017:** architecture §04's FSM diagram showed `STOPPED → disarm → CONFIGURED`, while the §04 prose and risk B13 say `Disarm` returns the service to `UNINIT` and forces re-`Configure` before the next `Arm`. This plan implements the canonical semantics: `disarm` from any of `CONFIGURED / ARMED / RUNNING / STOPPED / FAULT` → `UNINIT`; idempotent no-op at `UNINIT`. Direct `RUNNING → disarm` is emergency abort / E-stop / watchdog only; graceful cancel uses shot-boundary `stop → STOPPED → disarm`. The adapter's `on_disarm` hook, not the FSM, enforces descriptor-defined `safe_default` from every entry state. No driver-cached state survives a disarm.
 
 **Prerequisite note (Task 7+):** integration tests need Docker with `postgres:16`. Start it with the exact command given in Task 7.
 
@@ -51,7 +51,7 @@
 [project]
 name = "controlsystem"
 version = "0.1.0"
-description = "AMO neutral-atom lab control system (PLAN-V2 v1)"
+description = "AMO neutral-atom lab control system (architecture v1)"
 requires-python = ">=3.14,<3.15"
 dependencies = [
     "grpcio>=1.62",
@@ -515,7 +515,7 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'device_servers._base.
 - [ ] **Step 3: Implement `src/device_servers/_base/fsm.py`**
 
 ```python
-"""Lifecycle FSM shared by every managed device service (PLAN-V2 §04).
+"""Lifecycle FSM shared by every managed device service (architecture §04).
 
 Disarm semantics follow §04 prose, risk B13, and ADR-0017: disarm forces
 re-Configure before the next Arm and always returns to UNINIT. Direct
@@ -975,7 +975,7 @@ git commit -m "feat: LifecycleService base with adapter hooks and fault handling
 
 **Interfaces:**
 - Consumes: `LifecycleService`, `DeviceAdapter`, `DeviceFaultError` (Task 4); `proto_gen` (Task 2).
-- Produces: contract suite parametrized over a `service_factories` registry (`dict[str, Callable[[], ServiceCase]]`); each `ServiceCase` includes a `LifecycleService` plus test probes for configure/arm/disarm counts, proving cached replays skip payloaded hooks while repeated `Disarm` keys still reach the descriptor-defined safe default. Fakes expose counters; real adapters must probe observable safe-state actions for their device family. Produces `FakeCameraAdapter(DeviceAdapter)`; `FakeOpxAdapter(DeviceAdapter)`; `serve(port: int) -> grpc.Server` in both fake service `main.py` modules. The fake OPX is lifecycle-only: eight verbs and typed capabilities, no `QuantumMachinesManager`, no `RtJobResult`, no batch-push RPC. Those remain W2-1/W2-3. Every future device service adds one factory entry and inherits the whole suite — the base contract never changes (PLAN-V2 §04).
+- Produces: contract suite parametrized over a `service_factories` registry (`dict[str, Callable[[], ServiceCase]]`); each `ServiceCase` includes a `LifecycleService` plus test probes for configure/arm/disarm counts, proving cached replays skip payloaded hooks while repeated `Disarm` keys still reach the descriptor-defined safe default. Fakes expose counters; real adapters must probe observable safe-state actions for their device family. Produces `FakeCameraAdapter(DeviceAdapter)`; `FakeOpxAdapter(DeviceAdapter)`; `serve(port: int) -> grpc.Server` in both fake service `main.py` modules. The fake OPX is lifecycle-only: eight verbs and typed capabilities, no `QuantumMachinesManager`, no `RtJobResult`, no batch-push RPC. Those remain W2-1/W2-3. Every future device service adds one factory entry and inherits the whole suite — the base contract never changes (architecture §04).
 
 - [ ] **Step 1: Write the contract suite (failing)**
 
@@ -1043,7 +1043,7 @@ def service(service_case: ServiceCase) -> LifecycleService:
 
 ```python
 """Lifecycle contract: every managed device service must pass all of these
-(REQUIREMENTS.md TEST-01; PLAN-V2 §04). Parametrized via conftest SERVICE_FACTORIES."""
+(REQUIREMENTS.md TEST-01; architecture §04). Parametrized via conftest SERVICE_FACTORIES."""
 
 from typing import Any
 
@@ -1546,7 +1546,7 @@ def run() -> None:
 run()
 ```
 
-`schema/versions/0001_schema_v1.py` — `upgrade()` executes the DDL below verbatim (one `op.execute` block; `downgrade()` drops in reverse order). The DDL is PLAN-V2 §05 restricted to the Phase-1 table set, **column names copied exactly**:
+`schema/versions/0001_schema_v1.py` — `upgrade()` executes the DDL below verbatim (one `op.execute` block; `downgrade()` drops in reverse order). The DDL is architecture §05 restricted to the Phase-1 table set, **column names copied exactly**:
 
 ```sql
 CREATE TABLE device_descriptors (
@@ -1774,7 +1774,7 @@ Expected: FAIL (`No module named 'orchestrator.run_fsm'`)
 - [ ] **Step 3: Implement `src/orchestrator/run_fsm.py`**
 
 ```python
-"""Run + shot state machines, verbatim from PLAN-V2 §04 diagrams."""
+"""Run + shot state machines, verbatim from architecture §04 diagrams."""
 
 from __future__ import annotations
 
@@ -1867,7 +1867,7 @@ Expected: PASS (6 tests)
 
 ```bash
 git add src/orchestrator/run_fsm.py tests/unit/test_run_fsm.py
-git commit -m "feat: run and shot state machines per PLAN-V2 §04"
+git commit -m "feat: run and shot state machines per architecture §04"
 ```
 
 ---
@@ -2406,7 +2406,7 @@ def test_expected_service_that_never_beats_is_unhealthy() -> None:
 Run: `uv run pytest tests/unit/test_heartbeat.py -v` → FAIL (`ModuleNotFoundError`)
 
 ```python
-"""Heartbeat policy: 1 Hz default, 3-miss timeout (PLAN-V2 §04 heartbeat table)."""
+"""Heartbeat policy: 1 Hz default, 3-miss timeout (architecture §04 heartbeat table)."""
 
 from __future__ import annotations
 
@@ -2678,7 +2678,7 @@ Expected: FAIL (`No module named 'dashboards.operator_cli.main'`; also `typer` C
 - [ ] **Step 3: Implement `src/dashboards/operator_cli/main.py`**
 
 ```python
-"""Minimal `lab` operator CLI (PLAN-V2 W1-7)."""
+"""Minimal `lab` operator CLI (architecture W1-7)."""
 
 from __future__ import annotations
 
@@ -2790,7 +2790,7 @@ git commit -m "feat: lab operator CLI (submit-run, cancel, list-runs, status)"
 
 **Interfaces:**
 - Consumes: nothing in-repo (QUA scripts use `qm-qua`, installed lab-side only — not a project dependency yet).
-- Produces: provisional constants `PROTOCOL_VERSION=1`, `N_MAX_MOVES=1024` (placeholder, ADR-0002 remains Proposed), `HEADER_WORDS=16`, `MOVE_WORDS=6`, `BATCH_WORDS`, all `OFF_*` offsets for a signed-QUA-safe candidate layout; `Move` frozen dataclass `(src_x, src_y, tgt_x, tgt_y, group_id, t_ramp_ticks, flags)` (flags folded into the 6th word alongside group_id per layout below); `encode_batch(...) -> list[int]` and `decode_header(words: Sequence[int]) -> BatchHeader`. This is Phase 0A support code for representative payload generation, not a frozen RT contract. It stays provisional until W0A-1 derives `N_MAX_MOVES`, proves OPX/QOP capacity, and composes the measured latency budget. ADR-0002's PLAN-V2 seed uses two 32-bit words for 64-bit fields, but QUA `int` is signed; this task intentionally uses 31-bit chunks so high-bit hashes do not overflow signed QUA words.
+- Produces: provisional constants `PROTOCOL_VERSION=1`, `N_MAX_MOVES=1024` (placeholder, ADR-0002 remains Proposed), `HEADER_WORDS=16`, `MOVE_WORDS=6`, `BATCH_WORDS`, all `OFF_*` offsets for a signed-QUA-safe candidate layout; `Move` frozen dataclass `(src_x, src_y, tgt_x, tgt_y, group_id, t_ramp_ticks, flags)` (flags folded into the 6th word alongside group_id per layout below); `encode_batch(...) -> list[int]` and `decode_header(words: Sequence[int]) -> BatchHeader`. This is Phase 0A support code for representative payload generation, not a frozen RT contract. It stays provisional until W0A-1 derives `N_MAX_MOVES`, proves OPX/QOP capacity, and composes the measured latency budget. ADR-0002's architecture seed uses two 32-bit words for 64-bit fields, but QUA `int` is signed; this task intentionally uses 31-bit chunks so high-bit hashes do not overflow signed QUA words.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2862,7 +2862,7 @@ Expected: FAIL (`No module named 'broker.rearrangement_batch'`)
 - [ ] **Step 3: Implement `src/broker/rearrangement_batch.py`**
 
 ```python
-"""RearrangementBatchV1 wire layout (PLAN-V2 §07, ADR-0002 — PROVISIONAL until Phase 0A).
+"""RearrangementBatchV1 wire layout (architecture §07, ADR-0002 — PROVISIONAL until Phase 0A).
 
 Fixed-width homogeneous int vector for the QUA input stream. QUA ints are signed, so
 all 64-bit quantities are split into three 31-bit chunks (lo, mid, hi). This avoids
@@ -3013,7 +3013,7 @@ Run on the Tower against the lab OPX+. Requires `qm-qua` installed lab-side.
 For each size in SIZES, compiles a QUA program that declares an input stream of that
 size, loops `advance_input_stream -> get_timestamp -> output stream`, and measures
 PPU-tick deltas across N_SAMPLES pushes. Writes quantiles to w0a1_results.json.
-Host-side ping is deliberately NOT measured (PLAN-V2 §06 excludes it)."""
+Host-side ping is deliberately NOT measured (architecture §06 excludes it)."""
 
 import json
 import statistics
@@ -3078,7 +3078,7 @@ if __name__ == "__main__":
 
 Run on each host: `python w0a5_ntp_drift.py --hours 24`. Parses `w32tm /query /status`
 once per minute, appends (iso_time, offset_s) to w0a5_<hostname>.csv.
-Gate: sustained |offset| <= 10 ms (PLAN-V2 §06)."""
+Gate: sustained |offset| <= 10 ms (architecture §06)."""
 
 import argparse
 import csv
@@ -3118,7 +3118,7 @@ if __name__ == "__main__":
 `tests/hardware/derive_n_max_moves.py`:
 
 ```python
-"""N_MAX_MOVES derivation gate (PLAN-V2 §07): compute the per-loop move bound from
+"""N_MAX_MOVES derivation gate (architecture §07): compute the per-loop move bound from
 descriptor geometry + assignment policy, for current (~100 atoms) and projected
 (1000 atoms) geometries. Output feeds ADR-0002; the placeholder 1024 is NOT the answer.
 
@@ -3170,7 +3170,7 @@ git commit -m "feat: RearrangementBatchV1 encoder + Phase 0A measurement harness
 
 **Interfaces:**
 - Consumes: everything above.
-- Produces: written software-readiness record that explicitly keeps PLAN-V2 §12 Phase 0A/Phase 1 gates blocked where hardware evidence is missing.
+- Produces: written software-readiness record that explicitly keeps architecture §12 Phase 0A/Phase 1 gates blocked where hardware evidence is missing.
 
 - [ ] **Step 1: Run the full verification suite**
 
@@ -3183,7 +3183,7 @@ Expected: all green, coverage ≥ 80% on `src/orchestrator`, `src/compiler`, `sr
 
 - [ ] **Step 2: Walk the software-readiness evidence manually**
 
-Map each PLAN-V2 §12 Phase-1 software-side gate item to its evidence. This is readiness evidence only, not Phase 1 completion:
+Map each architecture §12 Phase-1 software-side gate item to its evidence. This is readiness evidence only, not Phase 1 completion:
 
 1. Orchestrator starts and exposes gRPC; admission enqueues an `AcceptedJob` → `tests/integration/test_scheduler_grpc.py::test_enqueue_returns_accepted_job`.
 2. Fake camera registers, returns typed `Capabilities` + `Health` → `tests/contract/` + `tests/integration/test_fake_camera_grpc.py`.
@@ -3199,7 +3199,7 @@ Map each PLAN-V2 §12 Phase-1 software-side gate item to its evidence. This is r
 
 ## Pre-Phase-1 Software Readiness — Control-Plane Skeleton (v1-dev, co-located)
 Date: <fill on completion>
-Status: software-readiness slice complete; PLAN-V2 Phase 1 remains blocked until
+Status: software-readiness slice complete; architecture Phase 1 remains blocked until
 Phase 0A gates pass.
 
 Ready:
@@ -3229,7 +3229,7 @@ Deviations: lifecycle disarm semantics are recorded in ADR-0017 (§04 diagram vs
 B13 prose reconciliation). No separate ADR is required for the phase-gate naming
 reconciliation.
 Next: run Phase 0A lab measurements using tests/hardware/. Phase 2 does not start
-as a PLAN-V2 phase until the written Phase 0A gate is complete.
+as an architecture phase until the written Phase 0A gate is complete.
 ```
 
 - [ ] **Step 4: Commit**
@@ -3243,7 +3243,7 @@ git commit -m "docs: record pre-phase-1 software readiness"
 
 ## What comes next (not in this plan)
 
-- **Phase 0A in the lab (blocking track):** run `tests/hardware/` scripts on the Tower/OPX; complete `N_MAX_MOVES` derivation; ratify ADR-0002/0010; write `network/MINIMAL_OPX.md`; safety-plane fault-injection per PLAN-V2 §09.
+- **Phase 0A in the lab (blocking track):** run `tests/hardware/` scripts on the Tower/OPX; complete `N_MAX_MOVES` derivation; ratify ADR-0002/0010; write `network/MINIMAL_OPX.md`; safety-plane fault-injection per architecture §09.
 - **Phase 2:** richer fake OPX broker double beyond lifecycle verbs, Layer-4 compiler v0 (+ `validation_token` issuance in `src/safety/`), `ShotResult`/`RunSummary` path, read-only observer dashboard, orchestrator `UNHEALTHY` enforcement from heartbeats. This starts only after the Phase 0A gate is written complete.
 - **Phase 3:** full calibration tables + publication transaction, execution bundles, durable shot-commit protocol (spool + fsync + replay), recovery tests, off-host replica.
 - **Phases 4–6:** modeled devices, Andor adapter + commissioning demo (`v1-dev_non_durable`), SLM remote adapter + `v1-lab` EliteDesk split.

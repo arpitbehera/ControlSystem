@@ -128,7 +128,7 @@ Maps to `REQUIREMENTS.md`: HW-01.
 2. **W5-2: Real-device adapter.** `src/device_servers/camera_andor/` implements the lifecycle contract against the Andor SDK.
 3. **W5-3: Hardware smoke tests.** `tests/hardware/test_andor.py` (manual run); confirms triggered acquisition, trigger response time, frame integrity.
 4. **W5-4: Rearrangement loop on real hardware.** Phase 0A's measurement spike code becomes a regression test on the actual loop. Latency budget enforced as a CI gate (against a recorded baseline).
-5. **W5-5: First commissioning demo.** A run that loads atoms, images them, rearranges them, and produces a defect-free target geometry — running through the full PLAN-V2 stack while still Tower-local. This is explicitly a `v1-dev` commissioning run with accepted Tower-disk durability risk, not routine scientific operation. Its outputs are commissioning data, not durable scientific data, and must not support durable analysis or publication claims.
+5. **W5-5: First commissioning demo.** A run that loads atoms, images them, rearranges them, and produces a defect-free target geometry — running through the full architecture stack while still Tower-local. This is explicitly a `v1-dev` commissioning run with accepted Tower-disk durability risk, not routine scientific operation. Its outputs are commissioning data, not durable scientific data, and must not support durable analysis or publication claims.
 
 **Exit gate:**
 1. Andor service registers, advertises typed `CameraCapabilities`, passes contract tests.

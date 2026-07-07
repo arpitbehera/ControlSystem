@@ -3,7 +3,7 @@
 ## Pre-Phase-1 Software Readiness - Control-Plane Skeleton (v1-dev, co-located)
 
 Date: 2026-07-06
-Status: software-readiness slice complete; PLAN-V2 Phase 1 remains blocked until
+Status: software-readiness slice complete; architecture Phase 1 remains blocked until
 Phase 0A gates pass.
 
 Ready:
@@ -59,5 +59,5 @@ Deviations:
 
 Next:
 - Run Phase 0A lab measurements using `tests/hardware/`.
-- Phase 2 does not start as a PLAN-V2 phase until the written Phase 0A gate is
+- Phase 2 does not start as an architecture phase until the written Phase 0A gate is
   complete.
