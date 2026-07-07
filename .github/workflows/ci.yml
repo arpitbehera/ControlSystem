@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
       - run: uv sync --all-groups
-      - run: uv run python -m grpc_tools.protoc -Iproto --python_out=src/proto_gen --grpc_python_out=src/proto_gen --pyi_out=src/proto_gen proto/*.proto
+      - run: make proto
         if: hashFiles('proto/*.proto') != ''
       - run: uv run ruff check src tests
       - run: uv run black --check src tests
